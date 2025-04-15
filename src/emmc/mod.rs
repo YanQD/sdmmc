@@ -94,6 +94,36 @@ impl EMmcHost {
 
     // Initialize the host controller
     pub fn init(&mut self, clk: &mut RK3568ClkPri) -> Result<(), SdError> {
+
+        // // Set initial bus width to 1-bit
+        // let ctrl0 = self.read_reg8(EMMC_HOST_CTRL0);
+        // let mut ctrl1 = self.read_reg16(EMMC_HOST_CTRL1);
+        // ctrl1 |= 1 << 24;
+        // // Disable clock
+        // ctrl1 &= !(1 << 2);
+        // ctrl1 &= !(1 << 0);
+
+        // self.write_reg16(EMMC_HOST_CTRL1, ctrl1);
+
+        // // info!("EMMC Host Control 1: {:#x}", ctrl & !EMMC_CTRL_4BITBUS & !EMMC_CTRL_8BITBUS);
+
+        // //self.write_reg8(EMMC_HOST_CTRL1,  ctrl1 & !EMMC_CTRL_4BITBUS & !EMMC_CTRL_8BITBUS);
+
+        // // // Set initial clock and wait for it to stabilize
+        // // self.dwcmshc_sdhci_emmc_set_clock(375000)?; // Start with 400 KHz for initialization
+
+        // // self.write_reg16(EMMC_HOST_CTRL2, 0);
+
+        // if !timeout_wait!((self.read_reg16(EMMC_HOST_CTRL2) & (0x7 << 24)) == 0) {
+        //     debug!("reset failed");
+        //     return Err(SdError::Timeout);
+        // }
+
+        // // Clear control2
+        // self.write_reg16(EMMC_HOST_CTRL2, 0);
+        // let base_clock = 100000000;
+
+
         // 对于时钟，查看是否需要初始化
         debug!("emmc_get_clk: {}", clk.emmc_get_clk().unwrap());
 

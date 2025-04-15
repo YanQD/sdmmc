@@ -52,7 +52,7 @@ mod tests {
         let emmc_addr = emmc_addr_ptr.as_ptr() as usize;
         let clk_addr = clk_add_ptr.as_ptr() as usize;
 
-        test_emmc(emmc_addr, clk_addr);
+        test_sdhci(emmc_addr);
 
         info!("test uboot");
     }
@@ -163,7 +163,7 @@ mod tests {
             }
         }
 
-        // Read a block from the SD card
+        // // Read a block from the SD card
         match sdhci.read_signal_block() {
             Ok(_) => {
                 println!("Block read from SD card");
@@ -172,6 +172,16 @@ mod tests {
                 warn!("Failed to read block from SD card: {:?}", e);
             }
         }
+
+        // Write a block to the SD card
+        // match sdhci.write_signal_block() {
+        //     Ok(_) => {
+        //         println!("Block written to SD card");
+        //     },
+        //     Err(e) => {
+        //         warn!("Failed to write block to SD card: {:?}", e);
+        //     }
+        // }
 
         // Test complete
         println!("SD card test complete");

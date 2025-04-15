@@ -1,8 +1,8 @@
 use log::{debug, info, warn};
 
+use super::{SdHost, constant::*};
+use crate::delay_us;
 use crate::err::SdError;
-
-use super::{constant::*, SdHost};
 
 #[derive(Debug)]
 pub struct SdCommand {
@@ -72,148 +72,148 @@ impl SdHost {
     pub fn send_command(&self, cmd: &SdCommand) -> Result<(), SdError> {
         // Check if command or data lines are busy
         let mut timeout = 100000;
-        while (self.read_reg(SDHCI_PRESENT_STATE) & (SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT)) != 0 {
-            if timeout == 0 {
-                return Err(SdError::Timeout);
+        let mut time: u32 = 0;
+        let mut trans_bytes;
+        let mut mask: u32 = 0;
+        let mut flags: u16;
+        let mut mode: u16;
+        let mut ret: i32 = 0;
+
+        if cmd.data_present {
+            mask |= SDHCI_DATA_INHIBIT;
+        }
+
+        if cmd.opcode == MMC_STOP_TRANSMISSION {
+            mask &= !SDHCI_DATA_INHIBIT;
+        }
+
+        // 循环直到状态寄存器的值不再符合掩码条件，或者超时
+        while self.read_reg(SDHCI_PRESENT_STATE) & mask != 0 {
+            if time >= timeout {
+                if 2 * timeout <= 3200 {
+                    timeout *= 2; // 将超时时间翻倍
+                    debug!("timeout increasing to: {} ms.", timeout);
+                    self.write_reg(SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK); // 清除中断状态
+                } else {
+                    debug!("timeout.");
+                    // 超过最大超时，退出循环
+                    break;
+                }
             }
-            timeout -= 1;
+            time += 1;
+            delay_us(1000);
         }
 
         // Clear interrupt status
         self.write_reg(SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK);
+        mask = SDHCI_INT_RESPONSE;
 
-        // Set argument
-        self.write_reg(SDHCI_ARGUMENT, cmd.arg);
-
-        // Set up transfer mode if data is present
-        if cmd.data_present {
-            // Set block size and count
-            self.write_reg16(SDHCI_BLOCK_SIZE, cmd.block_size);
-            self.write_reg16(SDHCI_BLOCK_COUNT, cmd.block_count);
-
-            // Set transfer mode
-            let mut mode = SDHCI_TRNS_BLK_CNT_EN;
-            if cmd.block_count > 1 {
-                mode |= SDHCI_TRNS_MULTI;
+        if cmd.resp_type & MMC_RSP_PRESENT == 0 {
+            flags = SDHCI_CMD_RESP_NONE;
+        } else if cmd.resp_type & MMC_RSP_136 != 0 {
+            flags = SDHCI_CMD_RESP_LONG;
+        } else if cmd.resp_type & MMC_RSP_BUSY != 0 {
+            flags = SDHCI_CMD_RESP_SHORT_BUSY;
+            if cmd.data_present {
+                mask |= SDHCI_INT_DATA_END;
             }
-            
-            if cmd.data_dir_read {
-                mode |= SDHCI_TRNS_READ;
-            }
-            
-            // For simplicity, we use programmed I/O, not DMA
-            // For a real driver, DMA would be preferred
-            self.write_reg16(SDHCI_TRANSFER_MODE, mode);
-        }
-
-        // Set command register
-        let mut command = (cmd.opcode as u16) << 8;
-
-        // Map response type to SDHCI format
-        if cmd.resp_type & MMC_RSP_PRESENT != 0 {
-            if cmd.resp_type & MMC_RSP_136 != 0 {
-                command |= SDHCI_CMD_RESP_LONG;
-            } else if cmd.resp_type & MMC_RSP_BUSY != 0 {
-                command |= SDHCI_CMD_RESP_SHORT_BUSY;
-            } else {
-                command |= SDHCI_CMD_RESP_SHORT;
-            }
+        } else {
+            flags = SDHCI_CMD_RESP_SHORT;
         }
 
         if cmd.resp_type & MMC_RSP_CRC != 0 {
-            command |= SDHCI_CMD_CRC;
+            flags |= SDHCI_CMD_CRC;
         }
-
         if cmd.resp_type & MMC_RSP_OPCODE != 0 {
-            command |= SDHCI_CMD_INDEX;
+            flags |= SDHCI_CMD_INDEX;
+        }
+        if cmd.arg != 0 {
+            flags |= SDHCI_CMD_DATA;
         }
 
-        if cmd.data_present {
-            command |= SDHCI_CMD_DATA;
+        if cmd.opcode == MMC_SEND_TUNING_BLOCK || cmd.opcode == MMC_SEND_TUNING_BLOCK_HS200 {
+            mask &= !SDHCI_INT_RESPONSE;
+            mask |= SDHCI_INT_DATA_AVAIL;
+            flags |= SDHCI_CMD_DATA;
         }
 
-        // Send the command
-        self.write_reg16(SDHCI_COMMAND, command);
+        debug!("checkpoint 05");
+        if cmd.data_present{
+            self.write_reg(0x0e, SDHCI_TIMEOUT_CONTROL); // 假设写操作的功能
+            mode = SDHCI_TRNS_BLK_CNT_EN;
+            trans_bytes = cmd.block_size * cmd.block_count;
 
-        info!("Sending command: {:#b}", command);
-
-        // Wait for command completion
-        timeout = 100000;
-        let mut int_status = 0;
-        while timeout > 0 {
-            int_status = self.read_reg(SDHCI_INT_STATUS);
-            if int_status & SDHCI_INT_ERROR_MASK != 0 {
-                // Command error
-                self.reset_cmd()?;
-                if cmd.data_present {
-                    self.reset_data()?;
-                }
-
-                // Map error to appropriate type
-                let err = if int_status & SDHCI_INT_TIMEOUT != 0 {
-                    SdError::Timeout
-                } else if int_status & SDHCI_INT_CRC != 0 {
-                    SdError::Crc
-                } else if int_status & SDHCI_INT_END_BIT != 0 {
-                    SdError::EndBit
-                } else if int_status & SDHCI_INT_INDEX != 0 {
-                    SdError::Index
-                } else if int_status & SDHCI_INT_DATA_TIMEOUT != 0 {
-                    SdError::DataTimeout
-                } else if int_status & SDHCI_INT_DATA_CRC != 0 {
-                    SdError::DataCrc
-                } else if int_status & SDHCI_INT_DATA_END_BIT != 0 {
-                    SdError::DataEndBit
-                } else {
-                    SdError::CommandError
-                };
-
-
-                return Err(err);
+            if cmd.block_count > 1 {
+                mode |= SDHCI_TRNS_MULTI;
             }
 
-            if int_status & SDHCI_INT_RESPONSE != 0 {
-                // Command completed successfully
+             if cmd.opcode as u16 == SDHCI_CMD_DATA {
+                 mode |= SDHCI_TRNS_READ;
+             }
+
+            self.write_reg(
+                SDHCI_BLOCK_SIZE,
+                sdhci_make_blksz(SDHCI_DEFAULT_BOUNDARY_ARG, cmd.block_size as u32),
+            );
+            self.write_reg(SDHCI_BLOCK_COUNT, cmd.block_count as u32);
+            self.write_reg(SDHCI_TRANSFER_MODE, mode as u32);
+        } else if cmd.resp_type == MMC_RSP_BUSY {
+            self.write_reg(SDHCI_TIMEOUT_CONTROL, 0xe);
+        }
+        
+        self.write_reg(SDHCI_ARGUMENT, cmd.arg);
+        self.write_reg16(
+            SDHCI_COMMAND,
+            sdhci_make_cmd(cmd.opcode as u16, flags),
+        );
+        debug!("checkpoint 06");
+
+        let start = get_timer(0);
+        let mut stat = self.read_reg(SDHCI_INT_STATUS);
+        loop {
+            stat = self.read_reg(SDHCI_INT_STATUS);
+            if stat & SDHCI_INT_ERROR != 0 {
                 break;
             }
 
-            timeout -= 1;
+            if get_timer(start) >= 1000 {
+                if  SDHCI_QUIRK_BROKEN_R1B != 0 {       //incomplete
+                    return Ok(());
+                } else {
+                    debug!("{}: Timeout for status update!", "update_status");
+                    return Err(SdError::Timeout);
+                }
+            }
+
+            if stat & mask == mask {
+                break;
+            }
+        }
+        if (stat & (SDHCI_INT_ERROR | mask)) == mask {
+            //sdhci_cmd_done(host, cmd);
+            self.write_reg( SDHCI_INT_STATUS, mask);
+        } else {
+            ret = -1;
         }
 
-        if timeout == 0 {
+        delay_us(1000);
+        stat = self.read_reg( SDHCI_INT_STATUS);
+	    self.write_reg(SDHCI_INT_STATUS, SDHCI_INT_ALL_MASK);;
+        if ret != 0 {
+            debug!("cmd: error: {}.", ret);
+            return Ok(()); // 在 Rust 中返回 0
+        }
+        let _= self.reset_cmd();
+        let _= self.reset_data();
+
+        if stat & SDHCI_INT_TIMEOUT != 0 {
             return Err(SdError::Timeout);
+        } else {
+		    return Ok(());
         }
-
-        // If data is present, wait for data completion
-        if cmd.data_present {
-            timeout = 1000000;
-            while timeout > 0 {
-                int_status = self.read_reg(SDHCI_INT_STATUS);
-                if int_status & SDHCI_INT_ERROR_MASK != 0 {
-                    // Data error
-                    self.reset_data()?;
-                    return Err(SdError::DataCrc);
-                }
-
-                if int_status & SDHCI_INT_DATA_END != 0 {
-                    // Data transfer completed
-                    break;
-                }
-
-                timeout -= 1;
-            }
-
-            if timeout == 0 {
-                warn!(" Command timeout ");
-                return Err(SdError::DataTimeout);
-            }
-        }
-
-        // Clear interrupt status
-        self.write_reg(SDHCI_INT_STATUS, int_status);
-
-        Ok(())
+        return Ok(());
     }
+
 
     // Get response from the last command
     pub fn get_response(&self) -> SdResponse {
@@ -224,4 +224,16 @@ impl SdHost {
         response.raw[3] = self.read_reg(SDHCI_RESPONSE + 12);
         response
     }
+}
+
+pub fn sdhci_make_blksz(dma: u32, blksz: u32) -> u32 {
+    ((dma & 0x7) << 12) | (blksz & 0xFFF)
+}
+
+pub fn sdhci_make_cmd(c: u16, f: u16) -> u16 {
+    ((c & 0xff) << 8) | (f & 0xff)
+}
+
+pub fn get_timer(start: u32) -> u32 {
+    start + 100
 }

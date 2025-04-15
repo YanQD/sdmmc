@@ -75,6 +75,8 @@ impl SdHost {
             block_addr * 512
         };
 
+        info!("addr is 0x{:x}", addr);
+
         // Send READ_SINGLE_BLOCK command
         let cmd = SdCommand::new(MMC_READ_SINGLE_BLOCK, addr, MMC_RSP_R1)
             .with_data(512, 1, true);
@@ -226,6 +228,8 @@ impl SdHost {
 
     // Write a block to the card
     pub fn write_block(&self, block_addr: u32, buffer: &[u8]) -> Result<(), SdError> {
+        debug!("write block start");
+        debug!("block_addr is 0x{:x}", block_addr);
         if buffer.len() != 512 {
             return Err(SdError::IoError);
         }
@@ -242,6 +246,7 @@ impl SdHost {
 
         // Check if card is write protected
         if self.is_write_protected() {
+            warn!("card is write protected");
             return Err(SdError::IoError);
         }
 

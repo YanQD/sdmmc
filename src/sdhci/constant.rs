@@ -155,8 +155,13 @@ pub const MMC_WRITE_BLOCK: u8 = 24;
 pub const MMC_WRITE_MULTIPLE_BLOCK: u8 = 25;
 pub const MMC_APP_CMD: u8 = 55;
 
+pub const MMC_SEND_TUNING_BLOCK: u8 = 19;
+pub const MMC_SEND_TUNING_BLOCK_HS200: u8 = 21;
+pub const SDHCI_DEFAULT_BOUNDARY_ARG: u32 = 0x123;
+
 // SD-specific commands
 pub const SD_SEND_RELATIVE_ADDR: u8 = 3;
+pub const IO_SET_OP_COND: u8 = 5;
 pub const SD_SWITCH_FUNC: u8 = 6;
 pub const SD_SEND_IF_COND: u8 = 8;
 pub const SD_APP_OP_COND: u8 = 41;
@@ -191,6 +196,7 @@ pub const MMC_STATE_HS200: u32 = 1 << 7;
 pub const MMC_STATE_HS400: u32 = 1 << 8;
 
 pub const SDHCI_CAN_DO_8BIT: u32 = 0x00040000; // 支持8位数据总线位掩码
+pub const SDHCI_QUIRK_BROKEN_R1B: u32 = 1 << 2; // R1B响应错误
 
 // 扩展CSD寄存器索引（用于CMD6切换命令）
 pub const EXT_CSD_BUS_WIDTH: u8 = 183;      // 总线宽度索引

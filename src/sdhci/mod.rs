@@ -127,7 +127,7 @@ impl SdHost {
         if !self.is_card_present() {
             return Err(SdError::NoCard);
         }
-
+        info!("init card");
         // Initialize the card
         self.init_card()?;
 
@@ -263,6 +263,10 @@ impl SdHost {
         let cmd = SdCommand::new(SD_SEND_IF_COND, voltage | check_pattern, MMC_RSP_R7);
         let res = self.send_command(&cmd);
         info!("CMD8 response: {:?}", res);
+
+        let cmd = SdCommand::new(IO_SET_OP_COND, 0, MMC_RSP_R1B);
+        let res = self.send_command(&cmd);
+
         let card_type = if res.is_ok() {
             // SD v2 or later
             let response = self.get_response().as_r7();
@@ -516,14 +520,14 @@ impl SdHost {
 
     // Read a block from the card
     pub fn read_signal_block(&self) -> Result<(), SdError> {
-        let addr: u32 = 0x4010000;
+        let addr: u32 = 0x00000000;
         let mut buf = [0u8; 512];
         return self.read_block(addr, &mut buf);
     }
 
     // Write a block to the card
     pub fn write_signal_block(&self) -> Result<(), SdError> {
-        let addr = 0x40100000;
+        let addr = 0x00000000;
         let mut buf = [1u8; 512];
         return self.write_block(addr, &mut buf);
     }
