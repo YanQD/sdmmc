@@ -52,7 +52,7 @@ mod tests {
         let emmc_addr = emmc_addr_ptr.as_ptr() as usize;
         let clk_addr = clk_add_ptr.as_ptr() as usize;
 
-        test_sdhci(emmc_addr);
+        test_emmc(emmc_addr, clk_addr);
 
         info!("test uboot");
     }

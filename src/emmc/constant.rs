@@ -114,6 +114,7 @@ pub const EMMC_CARD_INSERTED: u32 = 0x00010000;
 pub const EMMC_WRITE_PROTECT: u32 = 0x00080000;
 
 // EMMC host control flags
+pub const EMMC_CTRL_1BITBUS: u8 = 0x00;
 pub const EMMC_CTRL_4BITBUS: u8 = 0x02;
 pub const EMMC_CTRL_HISPD: u8 = 0x04;
 pub const EMMC_CTRL_DMA_MASK: u8 = 0x18;
@@ -382,3 +383,29 @@ pub const EMMC_POWER_ON: u8 = 0x01;
 pub const EMMC_POWER_180: u8= 0x0A;
 pub const EMMC_POWER_300: u8= 0x0C;
 pub const EMMC_POWER_330: u8= 0x0E;
+
+/* SDHC HC0 Mask */
+pub const EMMC_HC0_WIDTH_MASK: u8 = 0xDD;
+pub const EMMC_HC0_SPEED_MASK: u8 = 0xFB;
+pub const EMMC_HC0_HI_SPEED_EN: u8 = 0x04;
+pub const EMMC_HC0_EXT_DATA_WIDTH: u8 = 0x20;
+pub const EMMC_HC0_DMA_TYPE_MASK: u8 = 0xE7;
+
+/* SDHC HC1 Mask */
+pub const EMMC_HC1_SAMPLE_SELECT_TUNING_MASK: u16 = 0x00C0;
+pub const EMMC_HC1_EXECUTE_TUNING_MASK : u16 = 0xFFBF;
+pub const EMMC_HC1_EXECUTE_TUNING: u16 = 0x0040;
+pub const EMMC_HC1_1V8SIG_SPEEDMODE_MASK: u16 = 0xFFF0;
+pub const EMMC_HC1_SPEEDMODE_MASK: u16 = 0xFFF8;
+pub const EMMC_HC1_1V8SIG_MASK: u16 = 0xFFF7;
+pub const EMMC_HC1_1V8SIG_EN: u16 = 0x0008;
+
+pub const EMMC_MODE_LEGACY_COMPATIBLE_3V: u16 = 0x0020;
+pub const EMMC_MODE_HIGH_SPEED_SDR_3V: u16 = 0x0021;
+pub const EMMC_MODE_HIGH_SPEED_DDR_3V: u16 = 0x0024;
+pub const EMMC_MODE_HS200_1V8: u16 = 0x0023;
+
+pub const EMMC_POWER_STATE_OFF: u8 = 0x00;
+pub const EMMC_POWER_STATE_1V8: u8 = 0x0B;
+pub const EMMC_POWER_STATE_3V0: u8 = 0x0D;
+pub const EMMC_POWER_STATE_3V3: u8 = 0x0F;

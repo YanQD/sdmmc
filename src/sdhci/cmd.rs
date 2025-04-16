@@ -73,7 +73,6 @@ impl SdHost {
         // Check if command or data lines are busy
         let mut timeout = 100000;
         let mut time: u32 = 0;
-        let mut trans_bytes;
         let mut mask: u32 = 0;
         let mut flags: u16;
         let mut mode: u16;
@@ -139,10 +138,8 @@ impl SdHost {
 
         debug!("checkpoint 05");
         if cmd.data_present{
-            self.write_reg(0x0e, SDHCI_TIMEOUT_CONTROL); // 假设写操作的功能
+            //self.write_reg(SDHCI_TIMEOUT_CONTROL, 0xe); // 假设写操作的功能
             mode = SDHCI_TRNS_BLK_CNT_EN;
-            trans_bytes = cmd.block_size * cmd.block_count;
-
             if cmd.block_count > 1 {
                 mode |= SDHCI_TRNS_MULTI;
             }
@@ -155,18 +152,19 @@ impl SdHost {
                 SDHCI_BLOCK_SIZE,
                 sdhci_make_blksz(SDHCI_DEFAULT_BOUNDARY_ARG, cmd.block_size as u32),
             );
+
             self.write_reg(SDHCI_BLOCK_COUNT, cmd.block_count as u32);
             self.write_reg(SDHCI_TRANSFER_MODE, mode as u32);
         } else if cmd.resp_type == MMC_RSP_BUSY {
             self.write_reg(SDHCI_TIMEOUT_CONTROL, 0xe);
         }
-        
+
         self.write_reg(SDHCI_ARGUMENT, cmd.arg);
         self.write_reg16(
             SDHCI_COMMAND,
             sdhci_make_cmd(cmd.opcode as u16, flags),
         );
-        debug!("checkpoint 06");
+        debug!("checkpoint 07");
 
         let start = get_timer(0);
         let mut stat = self.read_reg(SDHCI_INT_STATUS);

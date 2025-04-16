@@ -124,6 +124,7 @@ impl EMmcHost {
         // let base_clock = 100000000;
 
 
+        self.reset_all()?;
         // 对于时钟，查看是否需要初始化
         debug!("emmc_get_clk: {}", clk.emmc_get_clk().unwrap());
 
@@ -183,27 +184,51 @@ impl EMmcHost {
         info!("voltage range: {:#x}", generic_fls(voltages as u32) - 1);
 
         // Reset the controller
-        self.reset_all()?;
+        //self.reset_all()?;
 
         // Perform full power cycle
         self.sdhci_set_power(generic_fls(voltages as u32) - 1)?;
 
-        // Enable interrupts
-        self.write_reg(EMMC_NORMAL_INT_STAT_EN, EMMC_INT_CMD_MASK | EMMC_INT_DATA_MASK);
-        self.write_reg(EMMC_SIGNAL_ENABLE, 0x0);
+        // Set bus width to 1-bit
+        let mut ctrl1 = self.read_reg8(EMMC_HOST_CTRL1);
+        debug!("ctrl1: {:#x}", ctrl1);
+        self.write_reg8(EMMC_HOST_CTRL1, ctrl1 & EMMC_HC0_WIDTH_MASK);
+        ctrl1 = self.read_reg8(EMMC_HOST_CTRL1);
+        debug!("ctrl1: {:#x}", ctrl1);
+        self.write_reg8(EMMC_HOST_CTRL1, ctrl1 | EMMC_CTRL_1BITBUS);
+        debug!("ctrl1: {:#x}", ctrl1);
 
-        // Set initial bus width to 1-bit
-        let ctrl = self.read_reg8(EMMC_HOST_CTRL1);
+        // set speed mode
+        ctrl1 = self.read_reg8(EMMC_HOST_CTRL1);
+        debug!("ctrl1: {:#x}", ctrl1);
+        ctrl1 &= EMMC_HC0_SPEED_MASK;
+        self.write_reg8(EMMC_HOST_CTRL1, ctrl1);
 
-        info!("EMMC Host Control 1: {:#x}", ctrl & !EMMC_CTRL_4BITBUS & !EMMC_CTRL_8BITBUS);
+        ctrl1 = self.read_reg8(EMMC_HOST_CTRL1);
+        debug!("ctrl1: {:#x}", ctrl1);
 
-        self.write_reg8(EMMC_HOST_CTRL1, ctrl & !EMMC_CTRL_4BITBUS & !EMMC_CTRL_8BITBUS);
+        //
+        let mut ctrl2 = self.read_reg16(EMMC_HOST_CTRL2);
+        ctrl2 &= EMMC_HC1_1V8SIG_SPEEDMODE_MASK;
+        ctrl2 |= EMMC_MODE_LEGACY_COMPATIBLE_3V & 0x07;
+        self.write_reg16(EMMC_HOST_CTRL2, ctrl2);
+
+        //
+        let mut pwr = self.read_reg8(EMMC_POWER_CTRL);
+        pwr &= EMMC_HC0_SPEED_MASK;
+        pwr |= EMMC_POWER_STATE_3V3;
+        info!("pwr {:#x}", pwr);
+        self.write_reg8(EMMC_POWER_CTRL, pwr);
 
         // Set initial clock and wait for it to stabilize
         debug!("emmc_get_clk {}", clk.emmc_get_clk().unwrap());
         self.dwcmshc_sdhci_emmc_set_clock(375000, clk)?; // Start with 400 KHz for initialization
 
-        self.write_reg16(EMMC_HOST_CTRL2, 0);
+        //self.write_reg16(EMMC_HOST_CTRL2, 0);
+
+        // Enable interrupts
+        self.write_reg(EMMC_NORMAL_INT_STAT_EN, EMMC_INT_CMD_MASK | EMMC_INT_DATA_MASK);
+        self.write_reg(EMMC_SIGNAL_ENABLE, 0x0);
 
         // let addr = 0xfffff000fe310000;
         // let size = 0x1000;
@@ -273,10 +298,6 @@ impl EMmcHost {
     // Initialize the eMMC card
     fn init_card(&mut self) -> Result<(), SdError> {
         info!("eMMC initialization started");
-        // For eMMC, we use CMD1 instead of ACMD41
-        // HCS=1, voltage window for eMMC as per specs
-        let ocr = 0x00; // 2.7V to 3.6V
-        let retry = 100;
 
         // Create card structure
         let mut card = EMmcCard::init(self.base_addr, CardType::Mmc);
@@ -285,12 +306,21 @@ impl EMmcHost {
 
         delay_us(1000000);
 
-        let mut cmd = EMmcCommand::new(MMC_SEND_OP_COND, ocr, MMC_RSP_R3);
+        let mut cmd = EMmcCommand::new(MMC_SEND_OP_COND, 0, MMC_RSP_R3);
+        self.send_command(&cmd)?;
+
+        debug!("CMD1 response : 0x{:x}", self.get_response().as_r3());
+
+        self.mmc_go_idle()?;
+
+        delay_us(1000000);
+
+        let mut cmd = EMmcCommand::new(MMC_SEND_OP_COND, 0x40000000|0x00FF8000|0x00000080, MMC_RSP_R3);
         self.send_command(&cmd)?;
         
         delay_us(1000000);
 
-        debug!("{:x}", self.get_response().as_r3());
+        debug!("CMD1 response : 0x{:x}", self.get_response().as_r3());
 
         // // Send CMD0 to reset the card
         // self.mmc_go_idle()?;

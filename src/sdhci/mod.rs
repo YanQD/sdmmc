@@ -93,6 +93,7 @@ impl SdHost {
 
     // Initialize the host controller
     pub fn init(&mut self) -> Result<(), SdError> {
+        self.reset_all()?;
         info!("Init SDHCI Controller");
 
         let version = self.read_reg16(SDHCI_HOST_VERSION);
@@ -104,7 +105,7 @@ impl SdHost {
         info!("SDHCI Capabilities 1: 0x{:x}", caps1);
 
         // Reset the controller
-        self.reset_all()?;
+        //self.reset_all()?;
 
         debug!("EMMC Normal Int Status: 0x{:x}", self.read_reg(SDHCI_INT_STATUS));
 
