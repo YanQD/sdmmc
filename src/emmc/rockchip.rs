@@ -121,11 +121,11 @@ impl EMmcHost {
             extra &= !0x1;
             self.write_reg(DWCMSHC_HOST_CTRL3, extra);
             
-            // reset the clock phase when the frequency is lower than 100MHz
-            self.write_reg(DWCMSHC_EMMC_DLL_CTRL, DWCMSHC_EMMC_DLL_BYPASS | DWCMSHC_EMMC_DLL_START);
-            self.write_reg(DWCMSHC_EMMC_DLL_RXCLK, DLL_RXCLK_ORI_GATE);
-            self.write_reg(DWCMSHC_EMMC_DLL_TXCLK, 0);
-            self.write_reg(DECMSHC_EMMC_DLL_CMDOUT, 0);
+            // // reset the clock phase when the frequency is lower than 100MHz
+            // self.write_reg(DWCMSHC_EMMC_DLL_CTRL, DWCMSHC_EMMC_DLL_BYPASS | DWCMSHC_EMMC_DLL_START);
+            // self.write_reg(DWCMSHC_EMMC_DLL_RXCLK, DLL_RXCLK_ORI_GATE);
+            // self.write_reg(DWCMSHC_EMMC_DLL_TXCLK, 0);
+            // self.write_reg(DECMSHC_EMMC_DLL_CMDOUT, 0);
             
             // Before switching to hs400es mode, the driver 
             // will enable enhanced strobe first. PHY needs to 

@@ -12,6 +12,8 @@ arm_pl011 = "0.1"
 kspin = "0.1"
 log = "0.4"
 bare-test = "0.4.1"
+tock-registers = "0.9.0"
+dma-api = { version = "0.2", features = ["alloc"] }
 
 [dev-dependencies]
 pcie = "0.2"

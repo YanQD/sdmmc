@@ -167,7 +167,7 @@ impl EMmcHost {
                 );
 
                 // Clear the command complete status
-                self.write_reg16(EMMC_NORMAL_INT_STAT, EMMC_INT_RESPONSE as u16);
+                //self.write_reg16(EMMC_NORMAL_INT_STAT, EMMC_INT_RESPONSE as u16);
 
                 // Check for errors
                 if status & (1 << 15) != 0 {

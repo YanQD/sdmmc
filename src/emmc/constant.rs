@@ -409,3 +409,22 @@ pub const EMMC_POWER_STATE_OFF: u8 = 0x00;
 pub const EMMC_POWER_STATE_1V8: u8 = 0x0B;
 pub const EMMC_POWER_STATE_3V0: u8 = 0x0D;
 pub const EMMC_POWER_STATE_3V3: u8 = 0x0F;
+
+
+pub const SDHC_NSR_ERR_INTR:u32 = 0x8000;
+pub const SDHC_NSR_CQ_INTR:u32 = 0x4000;
+pub const SDHC_NSR_RE_TUNING_INTR:u32 = 0x1000;
+pub const SDHC_NSR_CARD_INTR:u32 = 0x0100;
+pub const SDHC_NSR_CARD_REMOVE:u32 = 0x0080;
+pub const SDHC_NSR_CARD_INSERT:u32 = 0x0040;
+pub const SDHC_NSR_BUF_R_RDY:u32 = 0x0020;
+pub const SDHC_NSR_BUF_W_RDY:u32 = 0x0010;
+pub const SDHC_NSR_DMA_INTR:u32 = 0x0008;
+pub const SDHC_NSR_BLK_GAP_EVT:u32 = 0x0004;
+pub const SDHC_NSR_TRAN_COMPLETE:u32 = 0x0002;
+pub const SDHC_NSR_CMD_COMPLETE:u32 = 0x0001;
+
+pub const MMC_MAX_CMD_TIMEOUT: u32 = 0x00100000;
+pub const CARD_OK:u32 = 0;
+pub const CARD_CMD_RSP_TIMEOUT:u32 = 3;
+pub const CARD_INTERNAL_ERROR:u32 = 16;
