@@ -1,17 +1,39 @@
-use super::{EMmcHost, constant::*};
+use super::{EMmcHost};
 use crate::{
-    delay_us,
-    emmc::{aux::dll_lock_wo_tmout, clock::emmc_set_clk, config::EMmcChipConfig},
-    err::SdError,
+    delay_us, embedded_mmc::host::constants::*, emmc::{aux::dll_lock_wo_tmout, clock::emmc_set_clk}, err::SdError
 };
 use log::{debug, info};
+
+#[derive(Debug, Clone, Copy)]
+pub struct EMmcChipConfig {
+    pub flags: u32,
+    pub hs200_tx_tap: u8,
+    pub hs400_tx_tap: u8,
+    pub hs400_cmd_tap: u8,
+    pub hs400_strbin_tap: u8,
+    pub _ddr50_strbin_delay_num: u8,
+}
+
+impl EMmcChipConfig {
+    pub fn rk3568_config() -> Self {
+        Self {
+            flags: RK_RXCLK_NO_INVERTER,
+            hs200_tx_tap: 16,
+            hs400_tx_tap: 8,
+            hs400_cmd_tap: 8,
+            hs400_strbin_tap: 3,
+            _ddr50_strbin_delay_num: 16,
+        }
+    }
+}
+
 
 impl EMmcHost {
     // Rockchip EMMC设置时钟函数
     pub fn rockchip_emmc_set_clock(&mut self, freq: u32) -> Result<(), SdError> {
         // wait for command and data inhibit to be cleared
         let mut timeout = 20;
-        while (self.read_reg(EMMC_PRESENT_STATE) & (EMMC_CMD_INHIBIT | EMMC_DATA_INHIBIT)) != 0 {
+        while (self.read_reg32(EMMC_PRESENT_STATE) & (EMMC_CMD_INHIBIT | EMMC_DATA_INHIBIT)) != 0 {
             if timeout == 0 {
                 debug!("Timeout waiting for cmd & data inhibit");
                 return Err(SdError::Timeout);
@@ -36,7 +58,7 @@ impl EMmcHost {
         let sdhci_version = self.read_reg16(EMMC_HOST_CNTRL_VER);
 
         if (sdhci_version & 0xFF) >= EMMC_SPEC_300 {
-            let caps2 = self.read_reg(EMMC_CAPABILITIES2);
+            let caps2 = self.read_reg32(EMMC_CAPABILITIES2);
             let clk_mul = (caps2 & EMMC_CLOCK_MUL_MASK) >> EMMC_CLOCK_MUL_SHIFT;
 
             info!("EMMC Clock Mul: {}", clk_mul);
@@ -168,17 +190,17 @@ impl EMmcHost {
         // DLL配置基于频率
         if freq >= 100_000_000 {
             // Enable DLL
-            self.write_reg(DWCMSHC_EMMC_DLL_CTRL, DWCMSHC_EMMC_DLL_CTRL_RESET);
+            self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, DWCMSHC_EMMC_DLL_CTRL_RESET);
             delay_us(1000);
-            self.write_reg(DWCMSHC_EMMC_DLL_CTRL, 0);
+            self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, 0);
             let mut extra = 0x1 << 16 | 0x2 << 17 | 0x3 << 19;
-            self.write_reg(DWCMSHC_EMMC_ATCTRL, extra);
+            self.write_reg32(DWCMSHC_EMMC_ATCTRL, extra);
 
             /* Init DLL Setting */
             extra = DWCMSHC_EMMC_DLL_START_DEFAULT << DWCMSHC_EMMC_DLL_START_POINT
                 | DWCMSHC_EMMC_DLL_INC_VALUE << DWCMSHC_EMMC_DLL_INC
                 | DWCMSHC_EMMC_DLL_START;
-            self.write_reg(DWCMSHC_EMMC_DLL_CTRL, extra);
+            self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, extra);
 
             loop {
                 if timeout <= 0 {
@@ -186,7 +208,7 @@ impl EMmcHost {
                     return Err(SdError::Timeout);
                 }
 
-                if dll_lock_wo_tmout(self.read_reg(DWCMSHC_EMMC_DLL_STATUS0)) {
+                if dll_lock_wo_tmout(self.read_reg32(DWCMSHC_EMMC_DLL_STATUS0)) {
                     break;
                 }
 
@@ -194,7 +216,7 @@ impl EMmcHost {
                 timeout -= 1;
             }
 
-            let dll_lock_value = ((self.read_reg(DWCMSHC_EMMC_DLL_STATUS0) & 0xFF) * 2) & 0xFF;
+            let dll_lock_value = ((self.read_reg32(DWCMSHC_EMMC_DLL_STATUS0) & 0xFF) * 2) & 0xFF;
 
             extra = DWCMSHC_EMMC_DLL_DLYENA | DLL_RXCLK_ORI_GATE;
             if (data.flags & RK_RXCLK_NO_INVERTER) != 0 {
@@ -204,7 +226,7 @@ impl EMmcHost {
             if (data.flags & RK_TAP_VALUE_SEL) != 0 {
                 extra |= DLL_TAP_VALUE_SEL | (dll_lock_value << DLL_TAP_VALUE_OFFSET);
             }
-            self.write_reg(DWCMSHC_EMMC_DLL_RXCLK, extra);
+            self.write_reg32(DWCMSHC_EMMC_DLL_RXCLK, extra);
 
             let mut txclk_tapnum = data.hs200_tx_tap;
             if (data.flags & RK_DLL_CMD_OUT) != 0
@@ -221,7 +243,7 @@ impl EMmcHost {
                     extra |= DLL_TAP_VALUE_SEL | (dll_lock_value << DLL_TAP_VALUE_OFFSET);
                 }
 
-                self.write_reg(DECMSHC_EMMC_DLL_CMDOUT, extra);
+                self.write_reg32(DECMSHC_EMMC_DLL_CMDOUT, extra);
             }
 
             extra = DWCMSHC_EMMC_DLL_DLYENA
@@ -231,32 +253,32 @@ impl EMmcHost {
             if (data.flags & RK_TAP_VALUE_SEL) != 0 {
                 extra |= DLL_TAP_VALUE_SEL | (dll_lock_value << DLL_TAP_VALUE_OFFSET);
             }
-            self.write_reg(DWCMSHC_EMMC_DLL_TXCLK, extra);
+            self.write_reg32(DWCMSHC_EMMC_DLL_TXCLK, extra);
 
             extra =
                 DWCMSHC_EMMC_DLL_DLYENA | data.hs400_strbin_tap as u32 | DLL_STRBIN_TAPNUM_FROM_SW;
             if (data.flags & RK_TAP_VALUE_SEL) != 0 {
                 extra |= DLL_TAP_VALUE_SEL | (dll_lock_value << DLL_TAP_VALUE_OFFSET);
             }
-            self.write_reg(DWCMSHC_EMMC_DLL_STRBIN, extra);
+            self.write_reg32(DWCMSHC_EMMC_DLL_STRBIN, extra);
         } else {
             // Disable dll
-            self.write_reg(DWCMSHC_EMMC_DLL_CTRL, 0);
+            self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, 0);
 
             // Disable cmd conflict check
-            let mut extra = self.read_reg(DWCMSHC_HOST_CTRL3);
+            let mut extra = self.read_reg32(DWCMSHC_HOST_CTRL3);
 
             extra &= !0x1;
-            self.write_reg(DWCMSHC_HOST_CTRL3, extra);
+            self.write_reg32(DWCMSHC_HOST_CTRL3, extra);
 
             // reset the clock phase when the frequency is lower than 100MHz
-            self.write_reg(
+            self.write_reg32(
                 DWCMSHC_EMMC_DLL_CTRL,
                 DWCMSHC_EMMC_DLL_BYPASS | DWCMSHC_EMMC_DLL_START,
             );
-            self.write_reg(DWCMSHC_EMMC_DLL_RXCLK, DLL_RXCLK_ORI_GATE);
-            self.write_reg(DWCMSHC_EMMC_DLL_TXCLK, 0);
-            self.write_reg(DECMSHC_EMMC_DLL_CMDOUT, 0);
+            self.write_reg32(DWCMSHC_EMMC_DLL_RXCLK, DLL_RXCLK_ORI_GATE);
+            self.write_reg32(DWCMSHC_EMMC_DLL_TXCLK, 0);
+            self.write_reg32(DECMSHC_EMMC_DLL_CMDOUT, 0);
 
             // Before switching to hs400es mode, the driver
             // will enable enhanced strobe first. PHY needs to
@@ -266,7 +288,7 @@ impl EMmcHost {
                 | DLL_STRBIN_DELAY_NUM_SEL
                 | (ddr50_strbin_delay_num << DLL_STRBIN_DELAY_NUM_OFFSET);
             // info!("extra: {:#b}", extra);
-            self.write_reg(DWCMSHC_EMMC_DLL_STRBIN, extra);
+            self.write_reg32(DWCMSHC_EMMC_DLL_STRBIN, extra);
         }
 
         // Enable card clock

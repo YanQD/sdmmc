@@ -170,8 +170,6 @@ impl_emmc_card_proxy!(
     high_capacity: bool,
     version: u32,
     dsr: u32,
-    timing: u32,
-    bus_width: u8,
     part_support: u8,
     part_attr: u8,
     wr_rel_set: u8,

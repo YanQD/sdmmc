@@ -21,6 +21,8 @@ cfg-if = "1.0"
 default = ["pio"]
 dma = []
 pio = []
+rockchip = []
+phytium = []
 
 [dev-dependencies]
 pcie = "0.2"

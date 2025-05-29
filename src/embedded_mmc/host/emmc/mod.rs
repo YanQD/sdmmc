@@ -1,36 +1,18 @@
-extern crate alloc;
-
 mod block;
 mod cmd;
-mod config;
-mod info;
-mod regs;
-mod rockchip;
+mod err;
+mod ext;
 
-pub mod aux;
-pub mod clock;
-pub mod constant;
-
-use crate::{delay_us, err::*};
-use aux::{
-    MMC_VERSION_1_2, MMC_VERSION_1_4, MMC_VERSION_2_2, MMC_VERSION_3, MMC_VERSION_4,
-    MMC_VERSION_4_1, MMC_VERSION_4_2, MMC_VERSION_4_3, MMC_VERSION_4_5, MMC_VERSION_4_41,
-    MMC_VERSION_5_0, MMC_VERSION_5_1, MMC_VERSION_UNKNOWN, generic_fls, lldiv,
-};
-use block::EMmcCard;
-use cmd::*;
-use constant::*;
 use core::fmt::Display;
-#[cfg(feature = "dma")]
-use dma_api::{DVec, Direction};
-use info::CardType;
-use log::{debug, info, trace};
+use err::SdError;
+use log::{debug, info};
+
+use crate::{delay_us, embedded_mmc::{aux::generic_fls, commands::MmcCommand, host::constants::*}, emmc::aux::{lldiv, MMC_VERSION_4}, impl_register_ops};
 
 // SD Host Controller structure
 #[derive(Debug)]
 pub struct EMmcHost {
     base_addr: usize,
-    card: Option<EMmcCard>,
     caps: u32,
     clock_base: u32,
     voltages: u32,
@@ -38,85 +20,43 @@ pub struct EMmcHost {
     host_caps: u32,
     version: u16,
 
-    clock: u32,
-    bus_width: u8,
     timing: u32,
+    bus_width: u8,
+    clock: u32,
 }
 
 impl Display for EMmcHost {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "EMMC Controller {{ base_addr: {:#x}, card: {:?}, caps: {:#x}, clock_base: {} }}",
-            self.base_addr, self.card, self.caps, self.clock_base
+            "EMMC Controller {{ base_addr: {:#x}, caps: {:#x}, clock_base: {} }}",
+            self.base_addr, self.caps, self.clock_base
         )
     }
 }
 
+impl_register_ops!(EMmcHost, base_addr);
+
 impl EMmcHost {
-    pub fn new(base_addr: usize) -> Self {
-        let mut host = Self {
-            base_addr,
-            card: None,
-            caps: 0,
-            clock_base: 0,
-            voltages: 0,
-            quirks: 0,
-            host_caps: 0,
-            version: 0,
-
-            clock: 0,
-            bus_width: 0,
-            timing: MMC_TIMING_LEGACY,
-        };
-
-        // Read capabilities
-        host.caps = host.read_reg(EMMC_CAPABILITIES1);
-
-        // Calculate base clock from capabilities
-        host.clock_base = (host.caps >> 8) & 0xFF;
-        host.clock_base *= 1000000; // convert to Hz
-
-        info!("EMMC Controller created: {}", host);
-
-        host
-    }
-
-    // 获取 card 的不可变引用
-    pub fn card(&self) -> Option<&EMmcCard> {
-        self.card.as_ref()
-    }
-
-    // 获取 card 的可变引用
-    pub fn card_mut(&mut self) -> Option<&mut EMmcCard> {
-        self.card.as_mut()
-    }
-
     // Initialize the host controller
-    pub fn init(&mut self) -> Result<(), SdError> {
+    pub fn init_host(&mut self) -> Result<(), SdError> {
         info!("Init EMMC Controller");
-
-        // Create card structure
-        self.add_card(EMmcCard::init(CardType::Unknown));
 
         // Reset the controller
         self.reset(EMMC_RESET_ALL)?;
-
-        let is_card_inserted = self.is_card_present();
-        debug!("Card inserted: {}", is_card_inserted);
 
         let version = self.read_reg16(EMMC_HOST_CNTRL_VER);
         // version = 4.2
         self.version = version;
         info!("EMMC Version: 0x{:x}", version);
 
-        let caps1 = self.read_reg(EMMC_CAPABILITIES1);
+        let caps1 = self.read_reg32(EMMC_HOST_CNTRL_VER);
         info!("EMMC Capabilities 1: 0b{:b}", caps1);
 
         let mut clk_mul: u32 = 0;
 
         if (version & EMMC_SPEC_VER_MASK) >= EMMC_SPEC_300 {
-            let caps2 = self.read_reg(EMMC_CAPABILITIES2);
+            let caps2 = self.read_reg32(EMMC_CAPABILITIES2);
             info!("EMMC Capabilities 2: 0b{:b}", caps2);
             clk_mul = (caps2 & EMMC_CLOCK_MUL_MASK) >> EMMC_CLOCK_MUL_SHIFT;
         }
@@ -172,14 +112,14 @@ impl EMmcHost {
         );
 
         // Perform full power cycle
-        self.sdhci_set_power(generic_fls(voltages) - 1)?;
+        self.sdhci_set_power(generic_fls(voltages) - 1).unwrap();
 
         // Enable interrupts
-        self.write_reg(
+        self.write_reg32(
             EMMC_NORMAL_INT_STAT_EN,
             EMMC_INT_CMD_MASK | EMMC_INT_DATA_MASK,
         );
-        self.write_reg(EMMC_SIGNAL_ENABLE, 0x0);
+        self.write_reg32(EMMC_SIGNAL_ENABLE, 0x0);
 
         // Set initial bus width to 1-bit
         self.mmc_set_bus_width(1);
@@ -188,9 +128,6 @@ impl EMmcHost {
         self.mmc_set_clock(400000);
 
         self.mmc_set_timing(MMC_TIMING_LEGACY);
-
-        // Initialize the card
-        self.init_card()?;
 
         info!("EMMC initialization completed successfully");
         Ok(())
@@ -210,316 +147,6 @@ impl EMmcHost {
             timeout -= 1;
             delay_us(1000);
         }
-
-        Ok(())
-    }
-
-    // Check if card is present
-    fn is_card_present(&self) -> bool {
-        let state = self.read_reg(EMMC_PRESENT_STATE);
-        // debug!("EMMC Present State: {:#b}", state);
-        (state & EMMC_CARD_INSERTED) != 0 && ((state & EMMC_CARD_STABLE) != 0)
-    }
-
-    // Check if card is write protected
-    fn is_write_protected(&self) -> bool {
-        let state = self.read_reg(EMMC_PRESENT_STATE);
-        (state & EMMC_WRITE_PROTECT) != 0
-    }
-
-    // Initialize the eMMC card
-    fn init_card(&mut self) -> Result<(), SdError> {
-        info!("eMMC initialization started");
-
-        // CMD0: Put card into idle state
-        self.mmc_go_idle()?;
-
-        // CMD1: Send operation condition (OCR) and wait for card ready
-        let ocr = 0x00; // Voltage window: 2.7V to 3.6V
-        let retry = 100;
-        let ocr = self.mmc_send_op_cond(ocr, retry)?;
-
-        // Set RCA (Relative Card Address)
-        self.set_rca(1).unwrap();
-
-        // Determine if card is high capacity (SDHC/SDXC/eMMC)
-        let high_capacity = (ocr & OCR_HCS) == OCR_HCS;
-        self.set_high_capacity(high_capacity).unwrap();
-
-        // CMD2: Request CID (Card Identification)
-        let _cid = self.mmc_all_send_cid()?;
-
-        // CMD3: Set RCA and switch card to "standby" state
-        self.mmc_set_relative_addr()?;
-
-        // CMD9: Read CSD (Card-Specific Data) register
-        let csd = self.mmc_send_csd()?;
-
-        // Determine card version from CSD if unknown
-        let card = self.card.as_mut().unwrap();
-        if card.version() == MMC_VERSION_UNKNOWN {
-            let csd_version = (card.csd[0] >> 26) & 0xf;
-            debug!("eMMC CSD version: {}", csd_version);
-            match csd_version {
-                0 => card.version = MMC_VERSION_1_2,
-                1 => card.version = MMC_VERSION_1_4,
-                2 => card.version = MMC_VERSION_2_2,
-                3 => card.version = MMC_VERSION_3,
-                4 => card.version = MMC_VERSION_4,
-                _ => card.version = MMC_VERSION_1_2,
-            }
-        }
-
-        // Extract parameters from CSD for frequency, size, and block lengths
-        let (freq, mult, dsr_imp, mut read_bl_len, mut write_bl_len, csize, cmult) = {
-            let freq = FBASE[(csd[0] & 0x7) as usize];
-            let mult = MULTIPLIERS[((csd[0] >> 3) & 0xf) as usize];
-            let dsr_imp = (csd[1] >> 12) & 0x1;
-            let read_bl_len = (csd[1] >> 16) & 0xf;
-            let write_bl_len = (csd[3] >> 22) & 0xf;
-            let (csize, cmult) = if high_capacity {
-                ((csd[1] & 0x3f) << 16 | (csd[2] & 0xffff0000) >> 16, 8)
-            } else {
-                (
-                    (csd[1] & 0x3ff) << 2 | (csd[2] & 0xc0000000) >> 30,
-                    (csd[2] & 0x00038000) >> 15,
-                )
-            };
-            (freq, mult, dsr_imp, read_bl_len, write_bl_len, csize, cmult)
-        };
-
-        card.dsr_imp = dsr_imp;
-
-        // Calculate user capacity
-        let _tran_speed = freq * mult as usize;
-        let mut capacity_user = (csize as u64 + 1) << (cmult as u64 + 2);
-        capacity_user *= read_bl_len as u64;
-        card.capacity_user = capacity_user;
-
-        let mut capacity_gp = [0; 4];
-
-        // Clip read/write block lengths to max supported size
-        if write_bl_len > MMC_MAX_BLOCK_LEN {
-            write_bl_len = MMC_MAX_BLOCK_LEN;
-        }
-        if read_bl_len > MMC_MAX_BLOCK_LEN {
-            read_bl_len = MMC_MAX_BLOCK_LEN;
-        }
-
-        card.read_bl_len = read_bl_len;
-        card.write_bl_len = write_bl_len;
-
-        // CMD4: Set DSR if required by card
-        let dsr_needed = {
-            let card = self.card.as_ref().unwrap();
-            dsr_imp != 0 && 0xffffffff != card.dsr
-        };
-        if dsr_needed {
-            let dsr_value = {
-                let card = self.card.as_ref().unwrap();
-                (card.dsr & 0xffff) << 16
-            };
-            let cmd4 = EMmcCommand::new(MMC_SET_DSR, dsr_value, MMC_RSP_NONE);
-            self.send_command(&cmd4, None)?;
-        }
-
-        // CMD7: Select the card
-        let rca = {
-            let card = self.card.as_ref().unwrap();
-            card.rca
-        };
-        let cmd7 = EMmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1);
-        self.send_command(&cmd7, None)?;
-        debug!("cmd7: {:#x}", self.get_response().as_r1());
-
-        // Set initial erase group size and partition config
-        self.set_erase_grp_size(1).unwrap();
-        self.set_part_config(MMCPART_NOAVAILABLE).unwrap();
-
-        // For eMMC 4.0+, configure high-speed, EXT_CSD and partitions
-        let is_version_4_plus = {
-            let card = self.card.as_ref().unwrap();
-            card.version >= MMC_VERSION_4
-        };
-        if is_version_4_plus {
-            self.mmc_select_hs()?; // Switch to high speed
-            self.mmc_set_clock(MMC_HIGH_52_MAX_DTR); // Set high-speed clock
-
-            // Allocate buffer for EXT_CSD read
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "dma")] {
-                    let mut ext_csd: DVec<u8> = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice).unwrap();
-                } else if #[cfg(feature = "pio")] {
-                    let mut ext_csd: [u8; 512] = [0; 512];
-                }
-            }
-
-            // CMD8: Read EXT_CSD
-            self.mmc_send_ext_csd(&mut ext_csd)?;
-            let mut ext_csd = ext_csd.to_vec();
-            trace!("EXT_CSD: {:?}", ext_csd);
-
-            // Extract capacity and version
-            if ext_csd[EXT_CSD_REV as usize] >= 2 {
-                let mut capacity: u64 = ext_csd[EXT_CSD_SEC_CNT as usize] as u64
-                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8
-                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16
-                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24;
-                capacity *= MMC_MAX_BLOCK_LEN as u64;
-                if (capacity >> 20) > 2 * 1024 {
-                    self.set_capacity_user(capacity).unwrap();
-                }
-
-                let card = self.card.as_mut().unwrap();
-                match ext_csd[EXT_CSD_REV as usize] {
-                    1 => card.version = MMC_VERSION_4_1,
-                    2 => card.version = MMC_VERSION_4_2,
-                    3 => card.version = MMC_VERSION_4_3,
-                    5 => card.version = MMC_VERSION_4_41,
-                    6 => card.version = MMC_VERSION_4_5,
-                    7 => card.version = MMC_VERSION_5_0,
-                    8 => card.version = MMC_VERSION_5_1,
-                    _ => panic!("Unknown EXT_CSD revision"),
-                }
-            }
-
-            // Parse partition configuration info
-            let part_completed = (ext_csd[EXT_CSD_PARTITION_SETTING as usize] as u32
-                & EXT_CSD_PARTITION_SETTING_COMPLETED)
-                != 0;
-            self.set_part_support(ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize])
-                .unwrap();
-
-            if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
-                || ext_csd[EXT_CSD_BOOT_MULT as usize] != 0
-            {
-                self.set_part_config(ext_csd[EXT_CSD_PART_CONF as usize])
-                    .unwrap();
-            }
-
-            // Save enhanced partition attributes
-            if part_completed
-                && (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & ENHNCD_SUPPORT != 0)
-            {
-                let part_attr = ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize];
-                self.set_part_attr(part_attr).unwrap();
-            }
-
-            // Check secure erase support
-            if ext_csd[EXT_CSD_SEC_FEATURE_SUPPORT as usize] as u32 & EXT_CSD_SEC_GB_CL_EN != 0 {
-                let _mmc_can_trim = 1;
-            }
-
-            // Calculate boot and RPMB sizes
-            let capacity_boot = (ext_csd[EXT_CSD_BOOT_MULT as usize] as u64) << 17;
-            self.set_capacity_boot(capacity_boot).unwrap();
-            let capacity_rpmb = (ext_csd[EXT_CSD_RPMB_MULT as usize] as u64) << 17;
-            self.set_capacity_rpmb(capacity_rpmb).unwrap();
-            debug!("Boot partition size: {:#x}", capacity_boot);
-            debug!("RPMB partition size: {:#x}", capacity_rpmb);
-
-            // Calculate general purpose partition sizes
-            let mut has_parts = false;
-            for i in 0..4 {
-                let idx = EXT_CSD_GP_SIZE_MULT as usize + i * 3;
-                let mult = ((ext_csd[idx + 2] as u32) << 16)
-                    + ((ext_csd[idx + 1] as u32) << 8)
-                    + (ext_csd[idx] as u32);
-                if mult != 0 {
-                    has_parts = true;
-                }
-                if !part_completed {
-                    continue;
-                }
-                capacity_gp[i] = mult as u64;
-                capacity_gp[i] *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
-                capacity_gp[i] *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
-                capacity_gp[i] <<= 19;
-                self.set_capacity_gp(capacity_gp).unwrap();
-            }
-            debug!("GP partition sizes: {:?}", capacity_gp);
-
-            // Calculate enhanced user data size and start
-            if part_completed {
-                let mut enh_user_size = ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 2] as u64)
-                    << 16)
-                    + ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 1] as u64) << 8)
-                    + (ext_csd[EXT_CSD_ENH_SIZE_MULT as usize] as u64);
-                enh_user_size *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
-                enh_user_size *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
-                enh_user_size <<= 19;
-                self.set_enh_user_size(enh_user_size).unwrap();
-
-                let mut enh_user_start = ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 3] as u64)
-                    << 24)
-                    + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 2] as u64) << 16)
-                    + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 1] as u64) << 8)
-                    + (ext_csd[EXT_CSD_ENH_START_ADDR as usize] as u64);
-                if high_capacity {
-                    enh_user_start <<= 9;
-                }
-                self.set_enh_user_start(enh_user_start).unwrap();
-            }
-
-            // If partitions are configured, enable ERASE_GRP_DEF
-            if part_completed {
-                has_parts = true;
-            }
-
-            if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
-                && (ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize] as u32 & PART_ENH_ATTRIB != 0)
-            {
-                has_parts = true;
-            }
-
-            if has_parts {
-                let err = self.mmc_switch(EXT_CSD_CMD_SET_NORMAL, EXT_CSD_ERASE_GROUP_DEF, 1, true);
-                if err.is_err() {
-                    return Err(SdError::CommandError);
-                } else {
-                    ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] = 1;
-                }
-            }
-
-            // Calculate erase group size
-            if ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] & 0x01 != 0 {
-                self.set_erase_grp_size(
-                    (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u32) * 1024,
-                )
-                .unwrap();
-
-                if high_capacity && part_completed {
-                    let capacity = (ext_csd[EXT_CSD_SEC_CNT as usize] as u64)
-                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8)
-                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16)
-                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24);
-                    self.set_capacity_user(capacity * (MMC_MAX_BLOCK_LEN as u64))
-                        .unwrap();
-                }
-            } else {
-                let erase_gsz = (csd[2] & 0x00007c00) >> 10;
-                let erase_gmul = (csd[2] & 0x000003e0) >> 5;
-                self.set_erase_grp_size((erase_gsz + 1) * (erase_gmul + 1))
-                    .unwrap();
-            }
-
-            // Set high-capacity write-protect group size
-            let hc_wp_grp_size = 1024
-                * (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64)
-                * (ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64);
-            self.set_hc_wp_grp_size(hc_wp_grp_size).unwrap();
-
-            // Set write reliability and drive strength
-            self.set_wr_rel_set(ext_csd[EXT_CSD_WR_REL_SET as usize])
-                .unwrap();
-            self.set_raw_driver_strength(ext_csd[EXT_CSD_DRIVER_STRENGTH as usize])
-                .unwrap();
-        }
-
-        // Final initialization steps
-        self.mmc_set_capacity(0)?;
-        self.mmc_change_freq()?;
-        self.set_initialized(true).unwrap();
 
         Ok(())
     }
@@ -756,17 +383,6 @@ impl EMmcHost {
         Err(SdError::BadMessage)
     }
 
-    #[cfg(feature = "dma")]
-    fn compare_sector_count(&self, ext_csd: &DVec<u8>, test_csd: &DVec<u8>) -> bool {
-        let sec_cnt_offset = EXT_CSD_SEC_CNT as usize;
-        for i in 0..4 {
-            if ext_csd[sec_cnt_offset + i] != test_csd[sec_cnt_offset + i] {
-                return false;
-            }
-        }
-        true
-    }
-
     #[cfg(feature = "pio")]
     fn compare_sector_count(&self, ext_csd: &[u8], test_csd: &[u8]) -> bool {
         let sec_cnt_offset = EXT_CSD_SEC_CNT as usize;
@@ -855,7 +471,7 @@ impl EMmcHost {
         self.write_reg16(EMMC_XFER_MODE, EMMC_TRNS_READ);
 
         // Build and send the tuning command
-        let cmd = EMmcCommand::new(opcode, 0, MMC_RSP_R1);
+        let cmd = MmcCommand::new(opcode, 0, MMC_RSP_R1);
         self.send_command(&cmd, None)?;
 
         Ok(())
@@ -870,51 +486,6 @@ impl EMmcHost {
             || (timing == MMC_TIMING_MMC_HS400ES)
     }
 
-    #[cfg(feature = "dma")]
-    pub fn mmc_select_card_type(&self, ext_csd: &DVec<u8>) -> u16 {
-        let card_type = ext_csd[EXT_CSD_CARD_TYPE as usize] as u16;
-        let host_caps = self.host_caps;
-        let mut avail_type = 0;
-
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_26 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_26;
-        }
-
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_52 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_52;
-        }
-
-        if (host_caps & MMC_MODE_DDR_52MHZ != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_DDR_1_8V as u16 != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_DDR_1_8V as u16;
-        }
-
-        if (host_caps & MMC_MODE_HS200 != 0) && (card_type & EXT_CSD_CARD_TYPE_HS200_1_8V != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400 != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V | EXT_CSD_CARD_TYPE_HS400_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400ES != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (ext_csd[EXT_CSD_STROBE_SUPPORT as usize] != 0)
-            && (avail_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V
-                | EXT_CSD_CARD_TYPE_HS400_1_8V
-                | EXT_CSD_CARD_TYPE_HS400ES;
-        }
-
-        avail_type
-    }
-
-    #[cfg(feature = "pio")]
     pub fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
         let card_type = ext_csd[EXT_CSD_CARD_TYPE as usize] as u16;
         let host_caps = self.host_caps;
@@ -1000,7 +571,7 @@ impl EMmcHost {
         send_status: bool,
     ) -> Result<(), SdError> {
         let mut retries = 3;
-        let cmd = EMmcCommand::new(
+        let cmd = MmcCommand::new(
             MMC_SWITCH,
             (MMC_SWITCH_MODE_WRITE_BYTE << 24)
                 | (index << 16)

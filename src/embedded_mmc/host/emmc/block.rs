@@ -1,32 +1,12 @@
 // ===== Block Device Interface =====
 
-use aux::MMC_VERSION_UNKNOWN;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "dma")]
-use {
-    dma_api::DVec,
-    crate::delay_us,
-    log::{debug, info},
-};
+use super::EMmcHost;
 
 use log::trace;
 
-use crate::err::SdError;
-
-use super::{CardType, EMmcHost, aux, cmd::EMmcCommand, constant::*};
-
-#[cfg(feature = "pio")]
-pub enum DataBuffer<'a> {
-    Read(&'a mut [u8]),
-    Write(&'a [u8]),
-}
-
-#[cfg(feature = "dma")]
-pub enum DataBuffer<'a> {
-    Read(&'a mut DVec<u8>),
-    Write(&'a DVec<u8>),
-}
+use crate::{embedded_mmc::{aux::MMC_VERSION_UNKNOWN, card::CardType, commands::{DataBuffer, MmcCommand}, host::constants::*}, err::SdError};
 
 // EMmc Card structure
 #[derive(Debug)]
@@ -44,6 +24,9 @@ pub struct EMmcCard {
     pub high_capacity: bool,
     pub version: u32,
     pub dsr: u32,
+    pub timing: u32,
+    pub clock: u32,
+    pub bus_width: u8,
     pub part_support: u8,
     pub part_attr: u8,
     pub wr_rel_set: u8,
@@ -84,6 +67,9 @@ impl EMmcCard {
 
             version: MMC_VERSION_UNKNOWN,
             dsr: 0xffffffff,
+            timing: MMC_TIMING_LEGACY,
+            clock: 0,
+            bus_width: 0,
 
             high_capacity: false,
             card_caps: 0,
@@ -168,188 +154,11 @@ impl EMmcCard {
 }
 
 impl EMmcHost {
-    pub fn add_card(&mut self, card: EMmcCard) {
-        self.card = Some(card);
-    }
-
-    /// Read one or more data blocks from the card
-    #[cfg(feature = "dma")]
-    pub fn read_blocks(
-        &self,
-        block_id: u32,
-        blocks: u16,
-        buffer: &mut DVec<u8>,
-    ) -> Result<(), SdError> {
-        // Check if buffer size matches the expected size based on number of blocks
-        let expected_size = blocks as usize * 512;
-        if buffer.len() != expected_size {
-            return Err(SdError::IoError);
-        }
-
-        // Check if card is initialized and extract card information
-        let card = match &self.card {
-            Some(card) => card,
-            None => return Err(SdError::NoCard),
-        };
-
-        // Adjust block address based on card type
-        // High capacity cards use block addressing, standard capacity cards use byte addressing
-        let card_addr = if card.state & MMC_STATE_HIGHCAPACITY != 0 {
-            block_id // High capacity card: use block address directly
-        } else {
-            block_id * 512 // Standard capacity card: convert to byte address
-        };
-
-        trace!(
-            "Reading {} blocks starting at address: {:#x}",
-            blocks, card_addr
-        );
-
-        // Select appropriate command based on number of blocks
-        if blocks == 1 {
-            // Single block read operation
-            let cmd = EMmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
-                .with_data(512, 1, true); // Configure for reading 512 bytes with DMA
-            self.send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
-        } else {
-            // Multiple block read operation
-            let cmd = EMmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
-                .with_data(512, blocks, true); // Configure for reading multiple blocks with DMA
-
-            self.send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
-
-            // Must send stop transmission command after multiple block read
-            let stop_cmd = EMmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.send_command(&stop_cmd, None)?;
-        }
-
-        Ok(())
-    }
-
-    /// Write multiple blocks to the card
-    #[cfg(feature = "dma")]
-    pub fn write_blocks(
-        &self,
-        block_id: u32,
-        blocks: u16,
-        buffer: &DVec<u8>,
-    ) -> Result<(), SdError> {
-        // Verify that buffer size matches the requested number of blocks
-        let expected_size = blocks as usize * 512;
-        if buffer.len() != expected_size {
-            return Err(SdError::IoError);
-        }
-
-        // Extract card information and check if card exists
-        let card = match &self.card {
-            Some(card) => card,
-            None => return Err(SdError::NoCard),
-        };
-
-        // Check if card is properly initialized
-        if !card.initialized.load(Ordering::SeqCst) {
-            return Err(SdError::UnsupportedCard);
-        }
-
-        // Check if card is write protected
-        if self.is_write_protected() {
-            return Err(SdError::IoError);
-        }
-
-        // Determine the correct address based on card capacity type
-        let card_addr = if card.state & MMC_STATE_HIGHCAPACITY != 0 {
-            block_id // High capacity card: use block address directly
-        } else {
-            block_id * 512 // Standard capacity card: convert to byte address
-        };
-
-        trace!(
-            "Writing {} blocks starting at address: {:#x}",
-            blocks, card_addr
-        );
-
-        // Select appropriate command based on number of blocks
-        if blocks == 1 {
-            // Single block write operation
-            let cmd =
-                EMmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false); // Configure for writing 512 bytes with DMA (false = write)
-            self.send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
-        } else {
-            // Multiple block write operation
-            let cmd = EMmcCommand::new(MMC_WRITE_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
-                .with_data(512, blocks, false); // Configure for writing multiple blocks
-
-            self.send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
-
-            // Must send stop transmission command after multiple block write
-            let stop_cmd = EMmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.send_command(&stop_cmd, None)?;
-        }
-
-        Ok(())
-    }
-
-    /// Transfer data using DMA mode
-    /// This function polls for transfer completion or errors
-    #[cfg(feature = "dma")]
-    pub fn transfer_data_by_dma(&self) -> Result<(), SdError> {
-        let mut timeout = 100;
-
-        loop {
-            // Read the interrupt status register
-            let stat = self.read_reg16(EMMC_NORMAL_INT_STAT);
-            trace!("Transfer status: {:#b}", stat);
-
-            // Check for any errors during transfer
-            if stat & EMMC_INT_ERROR as u16 != 0 {
-                let err_status = self.read_reg16(EMMC_ERROR_INT_STAT);
-                trace!(
-                    "Data transfer error: status={:#b}, err_status={:#b}",
-                    stat, err_status
-                );
-
-                // Reset the data circuit to recover from error
-                self.reset_data()?;
-
-                // Determine specific error type based on error status bits
-                let err = if err_status & 0x10 != 0 {
-                    SdError::DataTimeout
-                } else if err_status & 0x20 != 0 {
-                    SdError::DataCrc
-                } else if err_status & 0x40 != 0 {
-                    SdError::DataEndBit
-                } else {
-                    SdError::DataError
-                };
-                return Err(err);
-            }
-
-            // Check if data transfer is complete
-            if stat & EMMC_INT_DATA_END as u16 != 0 {
-                // Clear the data end interrupt flag
-                self.write_reg16(EMMC_NORMAL_INT_STAT, EMMC_INT_DATA_END as u16);
-                break;
-            }
-
-            // Handle timeout to prevent infinite loop
-            if timeout > 0 {
-                timeout -= 1;
-                delay_us(1000); // Wait 1ms before checking again
-            } else {
-                info!("Data transfer timeout");
-                return Err(SdError::DataTimeout);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Read blocks from SD card using PIO (Programmed I/O) mode
     /// Parameters:
     /// - block_id: Starting block address to read from
     /// - blocks: Number of blocks to read
     /// - buffer: Buffer to store the read data
-    #[cfg(feature = "pio")]
     pub fn read_blocks(
         &self,
         block_id: u32,
@@ -381,19 +190,19 @@ impl EMmcHost {
 
         if blocks == 1 {
             // Single block read operation
-            let cmd = EMmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
+            let cmd = MmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
                 .with_data(512, 1, true);
-            self.send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
+            self.send_command(&cmd, Some(DataBuffer::Read(buffer))).unwrap();
         } else {
             // Multiple block read operation
-            let cmd = EMmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+            let cmd = MmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
                 .with_data(512, blocks, true);
 
-            self.send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
+            self.send_command(&cmd, Some(DataBuffer::Read(buffer))).unwrap();
 
             // Must send stop transmission command after multiple block read
-            let stop_cmd = EMmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.send_command(&stop_cmd, None)?;
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.send_command(&stop_cmd, None).unwrap();
         }
 
         Ok(())
@@ -404,7 +213,6 @@ impl EMmcHost {
     /// - block_id: Starting block address to write to
     /// - blocks: Number of blocks to write
     /// - buffer: Buffer containing data to write
-    #[cfg(feature = "pio")]
     pub fn write_blocks(&self, block_id: u32, blocks: u16, buffer: &[u8]) -> Result<(), SdError> {
         use log::trace;
 
@@ -418,10 +226,10 @@ impl EMmcHost {
             None => return Err(SdError::NoCard),
         };
 
-        // Check if card is write protected
-        if self.is_write_protected() {
-            return Err(SdError::IoError);
-        }
+        // // Check if card is write protected
+        // if self.is_write_protected() {
+        //     return Err(SdError::IoError);
+        // }
 
         // Determine the correct address based on card capacity type
         let card_addr = if card.state & MMC_STATE_HIGHCAPACITY != 0 {
@@ -439,18 +247,18 @@ impl EMmcHost {
         if blocks == 1 {
             // Single block write operation
             let cmd =
-                EMmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false);
-            self.send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
+                MmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false);
+            self.send_command(&cmd, Some(DataBuffer::Write(buffer))).unwrap();
         } else {
             // Multiple block write operation
-            let cmd = EMmcCommand::new(MMC_WRITE_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+            let cmd = MmcCommand::new(MMC_WRITE_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
                 .with_data(512, blocks, false);
 
-            self.send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
+            self.send_command(&cmd, Some(DataBuffer::Write(buffer))).unwrap();
 
             // Must send stop transmission command after multiple block write
-            let stop_cmd = EMmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.send_command(&stop_cmd, None)?;
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.send_command(&stop_cmd, None).unwrap();
         }
 
         Ok(())
@@ -474,7 +282,7 @@ impl EMmcHost {
                 for j in 0..4 {
                     if i + j * 4 < buffer.len() {
                         // Read 32-bit word from controller buffer
-                        values[j] = self.read_reg(EMMC_BUF_DATA);
+                        values[j] = self.read_reg32(EMMC_BUF_DATA);
 
                         if i + j * 4 + 3 < buffer.len() {
                             // Unpack 32-bit word into 4 bytes in little-endian order
@@ -506,7 +314,7 @@ impl EMmcHost {
                             | ((buffer[i + j * 4 + 3] as u32) << 24);
 
                         // Write 32-bit word to controller buffer
-                        self.write_reg(EMMC_BUF_DATA, values[j]);
+                        self.write_reg32(EMMC_BUF_DATA, values[j]);
                     }
                 }
 
@@ -549,7 +357,7 @@ impl EMmcHost {
             }
 
             // Write the 32-bit word to the buffer data register
-            self.write_reg(EMMC_BUF_DATA, val);
+            self.write_reg32(EMMC_BUF_DATA, val);
         }
 
         // Wait for data transfer to complete
@@ -568,7 +376,7 @@ impl EMmcHost {
         let len = buffer.len();
         for i in (0..len).step_by(4) {
             // Read 32-bit word from buffer data register
-            let val = self.read_reg(EMMC_BUF_DATA);
+            let val = self.read_reg32(EMMC_BUF_DATA);
 
             // Unpack the 32-bit word into individual bytes, handling buffer boundary
             buffer[i] = (val & 0xFF) as u8;
@@ -601,7 +409,7 @@ impl EMmcHost {
         let mut timeout = timeout_count;
         while timeout > 0 {
             // Read the current interrupt status
-            let int_status = self.read_reg(EMMC_NORMAL_INT_STAT);
+            let int_status = self.read_reg32(EMMC_NORMAL_INT_STAT);
 
             // Check if the target flag is set
             if int_status & flag != 0 {
@@ -618,7 +426,7 @@ impl EMmcHost {
                     (int_status & EMMC_INT_ERROR_MASK) as u16,
                 );
                 // Reset the data circuit
-                self.reset_data()?;
+                self.reset_data().unwrap();
                 return Err(SdError::DataError);
             }
 
