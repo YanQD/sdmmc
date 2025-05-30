@@ -153,20 +153,20 @@ impl SdhciHost {
         Ok(())
     }
 
-    fn mmc_set_bus_width(&mut self, width: u8) {
+    pub fn mmc_set_bus_width(&mut self, width: u8) {
         /* Set bus width */
         self.bus_width = width;
         debug!("Bus width set to {}", width);
         self.sdhci_set_ios();
     }
 
-    fn mmc_set_timing(&mut self, timing: u32) {
+    pub fn mmc_set_timing(&mut self, timing: u32) {
         /* Set timing */
         self.timing = timing;
         self.sdhci_set_ios();
     }
 
-    fn mmc_set_clock(&mut self, clk: u32) {
+    pub fn mmc_set_clock(&mut self, clk: u32) {
         /* Set clock */
         self.clock = clk;
         self.sdhci_set_ios();
@@ -363,20 +363,6 @@ impl SdhciHost {
             // Map specific error types
             let err = if err_status & 0x1 != 0 {
                 SdhciError::Timeout
-            // } else if err_status & 0x2 != 0 {
-            //     SdError::Crc
-            // } else if err_status & 0x4 != 0 {
-            //     SdError::EndBit
-            // } else if err_status & 0x8 != 0 {
-            //     SdError::Index
-            // } else if err_status & 0x10 != 0 {
-            //     SdError::DataTimeout
-            // } else if err_status & 0x20 != 0 {
-            //     SdError::DataCrc
-            // } else if err_status & 0x40 != 0 {
-            //     SdError::DataEndBit
-            // } else if err_status & 0x80 != 0 {
-            //     SdError::CurrentLimit
             } else {
                 SdhciError::CommandError
             };

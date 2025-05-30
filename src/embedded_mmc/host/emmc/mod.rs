@@ -383,7 +383,6 @@ impl EMmcHost {
         Err(SdError::BadMessage)
     }
 
-    #[cfg(feature = "pio")]
     fn compare_sector_count(&self, ext_csd: &[u8], test_csd: &[u8]) -> bool {
         let sec_cnt_offset = EXT_CSD_SEC_CNT as usize;
         for i in 0..4 {

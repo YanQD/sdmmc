@@ -28,7 +28,6 @@ impl EMmcChipConfig {
     }
 }
 
-
 impl SdhciHost {
     // Rockchip EMMC设置时钟函数
     pub fn rockchip_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
