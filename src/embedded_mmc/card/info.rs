@@ -7,7 +7,6 @@ use super::CardType;
 #[derive(Debug, Clone)]
 pub struct MmcCardExt {
     pub state: u32,
-    pub block_size: u32,
     pub capacity_blocks: u64,
 
     pub part_support: u8,
@@ -34,7 +33,6 @@ impl MmcCardExt {
     pub fn new() -> Self {
         MmcCardExt {
             state: 0,
-            block_size: 512,
             capacity_blocks: 0,
             part_support: 0,
             part_attr: 0,
@@ -62,7 +60,6 @@ impl MmcCardExt {
 #[derive(Debug, Clone)]
 pub struct SdCardExt {    
     pub state: u32,
-    pub block_size: u32,
     pub capacity_blocks: u64,
     pub dsr: u32,
     pub sd_ssr: Option<SdStatusRegister>,
@@ -72,7 +69,6 @@ impl SdCardExt {
     pub fn new() -> Self {
         SdCardExt {
             state: 0,
-            block_size: 512,
             capacity_blocks: 0,
             dsr: 0,
             sd_ssr: None,
@@ -94,7 +90,8 @@ pub struct BaseCardInfo {
     dsr: u32,
     capacity: u64,
     erase_grp_size: u32,
-    part_config: u8
+    part_config: u8,
+    block_size: u32,
 }
 
 impl BaseCardInfo {
@@ -113,6 +110,7 @@ impl BaseCardInfo {
             capacity: 0,
             erase_grp_size: 0,
             part_config: 0,
+            block_size: 512, // Default block size
         }
     }
 }
@@ -131,7 +129,8 @@ impl_accessors!(
     dsr: u32,
     capacity: u64,
     erase_grp_size: u32,
-    part_config: u8
+    part_config: u8,
+    block_size: u32
 );
 
 #[derive(Debug, Clone, Default)]

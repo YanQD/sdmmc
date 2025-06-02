@@ -31,6 +31,7 @@ pub enum MmcHostErr {
     CommandError,
     Timeout,
     Unsupported,
+    InvalidValue,
 }
 
 pub type MmcHostResult<T = ()> = Result<T, MmcHostErr>;
@@ -364,10 +365,25 @@ impl MmcHost {
         !(present_state & EMMC_DATA_0_LVL != 0)
     }
 
+    // cmd4 - Set DSR (Driver Stage Register)
     pub fn mmc_set_dsr(&mut self, dsr: u32) -> MmcHostResult {
         // Set DSR (Driver Stage Register) value
         let cmd = MmcCommand::new(MMC_SET_DSR, dsr, MMC_RSP_NONE);
         self.host_ops().send_command(&cmd, None).unwrap();
+        Ok(())
+    }
+
+    pub fn mmc_select_card(&mut self) -> MmcHostResult {
+        // Get the RCA value before borrowing the card
+        let card = self.card().unwrap();
+        let rca = card.base_info().rca();
+
+        // CMD7: Select the card
+        let cmd = MmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1);
+        self.host_ops().send_command(&cmd, None).unwrap();
+        
+        debug!("cmd7: {:#x}", self.host_ops().get_response().as_r1());
+
         Ok(())
     }
 
@@ -382,7 +398,8 @@ impl MmcHost {
         let ocr = 0x00; // Voltage window: 2.7V to 3.6V
         let retry = 100;
         let ocr = self.mmc_send_op_cond(ocr, retry)?;
-
+        let high_capacity = (ocr & OCR_HCS) == OCR_HCS;
+        
         {
             let card_mut = self.card_mut().unwrap();
 
@@ -390,7 +407,6 @@ impl MmcHost {
             card_mut.base_info_mut().set_rca(1);
 
             // Determine if card is high capacity (SDHC/SDXC/eMMC)
-            let high_capacity = (ocr & OCR_HCS) == OCR_HCS;
             card_mut.base_info_mut().set_high_capacity(high_capacity);
         }
     
@@ -456,8 +472,6 @@ impl MmcHost {
         let _tran_speed = freq * mult as usize;
         let mut capacity_user = (csize as u64 + 1) << (cmult as u64 + 2);
         capacity_user *= read_bl_len as u64;
-        let capacity_boot = 0;
-        let capacity_rpmb = 0;
 
         let mut capacity_gp = [0; 4];
 
@@ -490,15 +504,7 @@ impl MmcHost {
             self.mmc_set_dsr(dsr_value)?;
         }
 
-        // CMD7: Select the card
-        let cmd7 = {
-            let card_mut = self.card_mut().unwrap();
-            let rca = card_mut.base_info_mut().rca();
-            MmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1)
-        };
-
-        self.host_ops().send_command(&cmd7, None).unwrap();
-        debug!("cmd7: {:#x}", self.host_ops().get_response().as_r1());
+        self.mmc_select_card()?;
 
         // For eMMC 4.0+, configure high-speed, EXT_CSD and partitions
         let is_version_4_plus = {
@@ -525,169 +531,539 @@ impl MmcHost {
             let mut ext_csd = ext_csd.to_vec();
             trace!("EXT_CSD: {:?}", ext_csd);
 
-            // // Extract capacity and version
-            // if ext_csd[EXT_CSD_REV as usize] >= 2 {
-            //     let mut capacity: u64 = ext_csd[EXT_CSD_SEC_CNT as usize] as u64
-            //         | (ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8
-            //         | (ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16
-            //         | (ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24;
-            //     capacity *= MMC_MAX_BLOCK_LEN as u64;
-            //     if (capacity >> 20) > 2 * 1024 {
-            //         self.set_capacity_user(capacity).unwrap();
-            //     }
+            // Extract capacity and version
+            if ext_csd[EXT_CSD_REV as usize] >= 2 {
+                let mut capacity: u64 = ext_csd[EXT_CSD_SEC_CNT as usize] as u64
+                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8
+                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16
+                    | (ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24;
+                capacity *= MMC_MAX_BLOCK_LEN as u64;
+                if (capacity >> 20) > 2 * 1024 {
 
-            //     let card = self.card_mut().unwrap();
-            //     match ext_csd[EXT_CSD_REV as usize] {
-            //         1 => card.base_info_mut().set_card_version(MMC_VERSION_4_1),
-            //         2 => card.base_info_mut().set_card_version(MMC_VERSION_4_2),
-            //         3 => card.base_info_mut().set_card_version(MMC_VERSION_4_3),
-            //         5 => card.base_info_mut().set_card_version(MMC_VERSION_4_41),
-            //         6 => card.base_info_mut().set_card_version(MMC_VERSION_4_5),
-            //         7 => card.base_info_mut().set_card_version(MMC_VERSION_5_0),
-            //         8 => card.base_info_mut().set_card_version(MMC_VERSION_5_1),
-            //         _ => panic!("Unknown EXT_CSD revision"),
-            //     }
-            // }
+                    capacity_user  = capacity;
+                }
 
-            // // Parse partition configuration info
-            // let part_completed = (ext_csd[EXT_CSD_PARTITION_SETTING as usize] as u32
-            //     & EXT_CSD_PARTITION_SETTING_COMPLETED)
-            //     != 0;
-            // self.set_part_support(ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize])
-            //     .unwrap();
+                let card = self.card_mut().unwrap();
+                match ext_csd[EXT_CSD_REV as usize] {
+                    1 => card.base_info_mut().set_card_version(MMC_VERSION_4_1),
+                    2 => card.base_info_mut().set_card_version(MMC_VERSION_4_2),
+                    3 => card.base_info_mut().set_card_version(MMC_VERSION_4_3),
+                    5 => card.base_info_mut().set_card_version(MMC_VERSION_4_41),
+                    6 => card.base_info_mut().set_card_version(MMC_VERSION_4_5),
+                    7 => card.base_info_mut().set_card_version(MMC_VERSION_5_0),
+                    8 => card.base_info_mut().set_card_version(MMC_VERSION_5_1),
+                    _ => panic!("Unknown EXT_CSD revision"),
+                }
+            }
 
-            // if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
-            //     || ext_csd[EXT_CSD_BOOT_MULT as usize] != 0
-            // {
-            //     self.set_part_config(ext_csd[EXT_CSD_PART_CONF as usize])
-            //         .unwrap();
-            // }
+            // Parse partition configuration info
+            let part_completed = (ext_csd[EXT_CSD_PARTITION_SETTING as usize] as u32
+                & EXT_CSD_PARTITION_SETTING_COMPLETED)
+                != 0;
 
-            // // Save enhanced partition attributes
-            // if part_completed
-            //     && (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & ENHNCD_SUPPORT != 0)
-            // {
-            //     let part_attr = ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize];
-            //     self.set_part_attr(part_attr).unwrap();
-            // }
+            if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
+                || ext_csd[EXT_CSD_BOOT_MULT as usize] != 0
+            {
+                self.card_mut().unwrap().base_info_mut().set_part_config(ext_csd[EXT_CSD_PART_CONF as usize]);
+            }
 
-            // // Check secure erase support
-            // if ext_csd[EXT_CSD_SEC_FEATURE_SUPPORT as usize] as u32 & EXT_CSD_SEC_GB_CL_EN != 0 {
-            //     let _mmc_can_trim = 1;
-            // }
+            // Check secure erase support
+            if ext_csd[EXT_CSD_SEC_FEATURE_SUPPORT as usize] as u32 & EXT_CSD_SEC_GB_CL_EN != 0 {
+                let _mmc_can_trim = 1;
+            }
 
-            // // Calculate boot and RPMB sizes
-            // let capacity_boot = (ext_csd[EXT_CSD_BOOT_MULT as usize] as u64) << 17;
-            // self.set_capacity_boot(capacity_boot).unwrap();
-            // let capacity_rpmb = (ext_csd[EXT_CSD_RPMB_MULT as usize] as u64) << 17;
-            // self.set_capacity_rpmb(capacity_rpmb).unwrap();
-            // debug!("Boot partition size: {:#x}", capacity_boot);
-            // debug!("RPMB partition size: {:#x}", capacity_rpmb);
+            // Calculate boot and RPMB sizes
+            let capacity_boot = (ext_csd[EXT_CSD_BOOT_MULT as usize] as u64) << 17;
+            let capacity_rpmb = (ext_csd[EXT_CSD_RPMB_MULT as usize] as u64) << 17;
 
-            // // Calculate general purpose partition sizes
-            // let mut has_parts = false;
-            // for i in 0..4 {
-            //     let idx = EXT_CSD_GP_SIZE_MULT as usize + i * 3;
-            //     let mult = ((ext_csd[idx + 2] as u32) << 16)
-            //         + ((ext_csd[idx + 1] as u32) << 8)
-            //         + (ext_csd[idx] as u32);
-            //     if mult != 0 {
-            //         has_parts = true;
-            //     }
-            //     if !part_completed {
-            //         continue;
-            //     }
-            //     capacity_gp[i] = mult as u64;
-            //     capacity_gp[i] *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
-            //     capacity_gp[i] *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
-            //     capacity_gp[i] <<= 19;
-            //     self.set_capacity_gp(capacity_gp).unwrap();
-            // }
-            // debug!("GP partition sizes: {:?}", capacity_gp);
+            debug!("Boot partition size: {:#x}", capacity_boot);
+            debug!("RPMB partition size: {:#x}", capacity_rpmb);
 
-            // // Calculate enhanced user data size and start
-            // if part_completed {
-            //     let mut enh_user_size = ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 2] as u64)
-            //         << 16)
-            //         + ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 1] as u64) << 8)
-            //         + (ext_csd[EXT_CSD_ENH_SIZE_MULT as usize] as u64);
-            //     enh_user_size *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
-            //     enh_user_size *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
-            //     enh_user_size <<= 19;
-            //     self.set_enh_user_size(enh_user_size).unwrap();
+            // Calculate general purpose partition sizes
+            let mut has_parts = false;
+            for i in 0..4 {
+                let idx = EXT_CSD_GP_SIZE_MULT as usize + i * 3;
+                let mult = ((ext_csd[idx + 2] as u32) << 16)
+                    + ((ext_csd[idx + 1] as u32) << 8)
+                    + (ext_csd[idx] as u32);
+                if mult != 0 {
+                    has_parts = true;
+                }
+                if !part_completed {
+                    continue;
+                }
+                capacity_gp[i] = mult as u64;
+                capacity_gp[i] *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
+                capacity_gp[i] *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
+                capacity_gp[i] <<= 19;
+                
+            }
+            debug!("GP partition sizes: {:?}", capacity_gp);
 
-            //     let mut enh_user_start = ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 3] as u64)
-            //         << 24)
-            //         + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 2] as u64) << 16)
-            //         + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 1] as u64) << 8)
-            //         + (ext_csd[EXT_CSD_ENH_START_ADDR as usize] as u64);
-            //     if high_capacity {
-            //         enh_user_start <<= 9;
-            //     }
-            //     self.set_enh_user_start(enh_user_start).unwrap();
-            // }
+            let (mut enh_user_size, mut enh_user_start) = (0, 0);
+            // Calculate enhanced user data size and start
+            if part_completed {
+                enh_user_size = ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 2] as u64)
+                    << 16)
+                    + ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 1] as u64) << 8)
+                    + (ext_csd[EXT_CSD_ENH_SIZE_MULT as usize] as u64);
+                enh_user_size *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
+                enh_user_size *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
+                enh_user_size <<= 19;
+                
+                enh_user_start = ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 3] as u64)
+                    << 24)
+                    + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 2] as u64) << 16)
+                    + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 1] as u64) << 8)
+                    + (ext_csd[EXT_CSD_ENH_START_ADDR as usize] as u64);
+                if high_capacity {
+                    enh_user_start <<= 9;
+                }
+            }
 
-            // // If partitions are configured, enable ERASE_GRP_DEF
-            // if part_completed {
-            //     has_parts = true;
-            // }
+            // If partitions are configured, enable ERASE_GRP_DEF
+            if part_completed {
+                has_parts = true;
+            }
 
-            // if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
-            //     && (ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize] as u32 & PART_ENH_ATTRIB != 0)
-            // {
-            //     has_parts = true;
-            // }
+            if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
+                && (ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize] as u32 & PART_ENH_ATTRIB != 0)
+            {
+                has_parts = true;
+            }
 
-            // if has_parts {
-            //     let err = self.mmc_switch(EXT_CSD_CMD_SET_NORMAL, EXT_CSD_ERASE_GROUP_DEF, 1, true);
-            //     if err.is_err() {
-            //         return Err(MmcHostErr::CommandError);
-            //     } else {
-            //         ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] = 1;
-            //     }
-            // }
+            if has_parts {
+                let err = self.mmc_switch(EXT_CSD_CMD_SET_NORMAL, EXT_CSD_ERASE_GROUP_DEF, 1, true);
+                if err.is_err() {
+                    return Err(MmcHostErr::CommandError);
+                } else {
+                    ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] = 1;
+                }
+            }
 
-            // // Calculate erase group size
-            // if ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] & 0x01 != 0 {
-            //     self.set_erase_grp_size(
-            //         (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u32) * 1024,
-            //     )
-            //     .unwrap();
+            // Calculate erase group size
+            if ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] & 0x01 != 0 {
+                self.card_mut().unwrap().base_info_mut().set_erase_grp_size(
+                    (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u32) * 1024,
+                );
 
-            //     if high_capacity && part_completed {
-            //         let capacity = (ext_csd[EXT_CSD_SEC_CNT as usize] as u64)
-            //             | ((ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8)
-            //             | ((ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16)
-            //             | ((ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24);
-            //         self.set_capacity_user(capacity * (MMC_MAX_BLOCK_LEN as u64))
-            //             .unwrap();
-            //     }
-            // } else {
-            //     let erase_gsz = (csd[2] & 0x00007c00) >> 10;
-            //     let erase_gmul = (csd[2] & 0x000003e0) >> 5;
-            //     self.set_erase_grp_size((erase_gsz + 1) * (erase_gmul + 1))
-            //         .unwrap();
-            // }
+                let high_capacity = self.card().unwrap().base_info().high_capacity();
+                if high_capacity && part_completed {
+                    let capacity = (ext_csd[EXT_CSD_SEC_CNT as usize] as u64)
+                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 1] as u64) << 8)
+                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 2] as u64) << 16)
+                        | ((ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24);
+                    capacity_user = capacity * (MMC_MAX_BLOCK_LEN as u64);
+                }
+            } else {
+                let erase_gsz = (csd[2] & 0x00007c00) >> 10;
+                let erase_gmul = (csd[2] & 0x000003e0) >> 5;
+                self.card_mut().unwrap().base_info_mut().set_erase_grp_size((erase_gsz + 1) * (erase_gmul + 1));
+            }
 
-            // // Set high-capacity write-protect group size
-            // let hc_wp_grp_size = 1024
-            //     * (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64)
-            //     * (ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64);
-            // self.set_hc_wp_grp_size(hc_wp_grp_size).unwrap();
+            // Set high-capacity write-protect group size
+            let hc_wp_grp_size = 1024
+                * (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64)
+                * (ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64);
+            
+            let mmc_ext = self.card_mut().unwrap().cardext_mut().unwrap().as_mut_mmc().unwrap();
+            mmc_ext.part_support = ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize];
+            mmc_ext.capacity_boot = capacity_boot;
+            mmc_ext.capacity_rpmb = capacity_rpmb;
+            mmc_ext.capacity_gp = capacity_gp;
+            mmc_ext.hc_wp_grp_size = hc_wp_grp_size;
+            mmc_ext.capacity_user = capacity_user;
 
-            // // Set write reliability and drive strength
-            // self.set_wr_rel_set(ext_csd[EXT_CSD_WR_REL_SET as usize])
-            //     .unwrap();
-            // self.set_raw_driver_strength(ext_csd[EXT_CSD_DRIVER_STRENGTH as usize])
-            //     .unwrap();
+            // Set write reliability and drive strength
+            mmc_ext.wr_rel_set = ext_csd[EXT_CSD_WR_REL_SET as usize];
+            mmc_ext.raw_driver_strength = ext_csd[EXT_CSD_DRIVER_STRENGTH as usize];
+
+            if part_completed {
+                // Save enhanced partition attributes
+                if ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & ENHNCD_SUPPORT != 0 {
+                    mmc_ext.part_attr = ext_csd[EXT_CSD_PARTITIONS_ATTRIBUTE as usize];
+                }
+                mmc_ext.enh_user_size = enh_user_size;
+                mmc_ext.enh_user_start = enh_user_start;
+            }
         }
 
-        // // Final initialization steps
-        // self.mmc_set_capacity(0)?;
-        // self.mmc_change_freq()?;
+        // Final initialization steps
+        self.mmc_set_capacity(0)?;
+        self.mmc_change_freq()?;
         self.card_mut().unwrap().set_initialized(true);
 
         Ok(())
+    }
+
+    fn mmc_set_capacity(&mut self, part_num: u32) -> MmcHostResult {
+        // part_num 暂时设置为 0
+        let card_mut = self.card_mut().unwrap();
+        let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
+        match part_num {
+            0 =>  {
+                let capacity_user =mmc_ext.capacity_user;
+                card_mut.base_info_mut().set_capacity(capacity_user);
+            },
+            1 | 2 => {
+                let capacity_boot = mmc_ext.capacity_boot;
+                card_mut.base_info_mut().set_capacity(capacity_boot);
+            },
+            3 => {
+                let capacity_rpmb = mmc_ext.capacity_rpmb; 
+                card_mut.base_info_mut().set_capacity(capacity_rpmb);
+            },
+            4..=7 => {
+                let capacity_gp = mmc_ext.capacity_gp;
+                card_mut.base_info_mut().set_capacity(capacity_gp[(part_num - 4) as usize]);
+            },
+            _ => return Err(MmcHostErr::InvalidValue),
+        }
+
+        let capacity = card_mut.base_info().capacity();
+        let read_bl_len = card_mut.base_info().read_bl_len();
+        let _lba = lldiv(capacity, read_bl_len);
+
+        Ok(())
+    }  
+
+    pub fn mmc_change_freq(&mut self) -> MmcHostResult {
+        let card_mut = self.card_mut().unwrap();
+        let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
+        // Allocate buffer for EXT_CSD depending on whether DMA or PIO is enabled
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "dma")] {
+                let mut ext_csd: DVec<u8> = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice).unwrap();
+            } else if #[cfg(feature = "pio")] {
+                let mut ext_csd: [u8; 512] = [0; 512];
+            }
+        }
+
+        // Initialize card capabilities flags
+        self.set_card_caps(0).unwrap();
+
+        // Get card version (default to 0 if not available)
+        let version = self.version().unwrap_or(0);
+
+        // Only cards version 4.0 and above support high-speed modes
+        if version < MMC_VERSION_4 {
+            return Ok(());
+        }
+
+        // Enable both 4-bit and 8-bit modes on the card
+        self.set_card_caps(MMC_MODE_4BIT | MMC_MODE_8BIT).unwrap();
+
+        // Read the EXT_CSD register from the card
+        self.mmc_send_ext_csd(&mut ext_csd)?;
+
+        // Determine supported high-speed modes from EXT_CSD
+        let avail_type = self.mmc_select_card_type(&ext_csd);
+
+        // Select the appropriate high-speed mode supported by both host and card
+        let result = if avail_type & EXT_CSD_CARD_TYPE_HS200 != 0 {
+            // HS200 mode
+            self.mmc_select_hs200()
+        } else if avail_type & EXT_CSD_CARD_TYPE_HS != 0 {
+            // Standard high-speed mode
+            self.mmc_select_hs()
+        } else {
+            Err(MmcHostErr::InvalidValue)
+        };
+
+        // Apply the result of speed mode selection
+        result?;
+
+        // Configure the bus speed according to selected type
+        self.mmc_set_bus_speed(avail_type as u32);
+
+        // If HS200 mode was selected, perform tuning procedure
+        if self.mmc_card_hs200() {
+            let tuning_result = self.mmc_hs200_tuning();
+
+            // Optionally upgrade to HS400 mode if supported and using 8-bit bus
+            if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0
+                && self.bus_width == MMC_BUS_WIDTH_8BIT
+            {
+                // self.mmc_select_hs400()?; // Currently not executed
+                self.mmc_set_bus_speed(avail_type as u32);
+            }
+
+            tuning_result
+        } else if !self.mmc_card_hs400es() {
+            // If not in HS400 Enhanced Stroxbe mode, try to switch bus width
+            let width_result = self.mmc_select_bus_width()?;
+            let err = if width_result > 0 {
+                Ok(())
+            } else {
+                Err(MmcHostErr::CommandError)
+            };
+
+            // If DDR52 mode is supported, implement selection (currently TODO)
+            if err.is_ok() && avail_type & EXT_CSD_CARD_TYPE_DDR_52 as u16 != 0 {
+                todo!("Implement HS-DDR selection");
+            }
+
+            err
+        } else {
+            // Already in HS400ES mode, no further action needed
+            Ok(())
+        }
+    }
+
+    pub fn mmc_select_hs200(&mut self) -> MmcHostResult {
+        let ret = self.mmc_select_bus_width()?;
+
+        if ret > 0 {
+            self.mmc_switch(
+                EXT_CSD_CMD_SET_NORMAL,
+                EXT_CSD_HS_TIMING,
+                EXT_CSD_TIMING_HS200,
+                false,
+            )?;
+
+            self.host_ops_mut().mmc_set_timing(MMC_TIMING_MMC_HS200);
+        }
+
+        Ok(())
+    }
+
+    fn mmc_select_bus_width(&mut self) -> MmcHostResult<i32> {
+        let ext_csd_bits: [u8; 2] = [EXT_CSD_BUS_WIDTH_8, EXT_CSD_BUS_WIDTH_4];
+        let bus_widths: [u8; 2] = [MMC_BUS_WIDTH_8BIT, MMC_BUS_WIDTH_4BIT];
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "dma")] {
+                let mut ext_csd: DVec<u8> = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice).unwrap();
+                let mut test_csd = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice)
+        .ok_or(SdError::MemoryError)?;
+            } else if #[cfg(feature = "pio")] {
+                let mut ext_csd: [u8; 512] = [0; 512];
+                let mut test_csd: [u8; 512] = [0; 512];
+            }
+        }
+
+        // 版本检查和主机能力检查
+        if self.version().unwrap_or(0) < MMC_VERSION_4
+            || (self.host_caps & (MMC_MODE_4BIT | MMC_MODE_8BIT)) == 0
+        {
+            return Ok(0);
+        }
+
+        self.mmc_send_ext_csd(&mut ext_csd)?;
+
+        let mut idx = if (self.host_caps & MMC_MODE_8BIT) != 0 {
+            0
+        } else {
+            1
+        };
+        while idx < bus_widths.len() {
+            let switch_result = self.mmc_switch(
+                EXT_CSD_CMD_SET_NORMAL,
+                EXT_CSD_BUS_WIDTH,
+                ext_csd_bits[idx],
+                true,
+            );
+
+            if switch_result.is_err() {
+                idx += 1;
+                continue;
+            }
+
+            let bus_width = bus_widths[idx];
+            self.mmc_set_bus_width(bus_width);
+
+            // 再次读取EXT_CSD进行验证
+            let test_result = self.mmc_send_ext_csd(&mut test_csd);
+
+            if test_result.is_err() {
+                idx += 1;
+                continue;
+            }
+            if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize]
+                == test_csd[EXT_CSD_PARTITIONING_SUPPORT as usize])
+                && (ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize]
+                    == test_csd[EXT_CSD_HC_WP_GRP_SIZE as usize])
+                && (ext_csd[EXT_CSD_REV as usize] == test_csd[EXT_CSD_REV as usize])
+                && (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize]
+                    == test_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize])
+                && self.compare_sector_count(&ext_csd, &test_csd)
+            {
+                return Ok(bus_width as i32);
+            } else {
+                idx += 1;
+            }
+        }
+
+        Err(MmcHostErr::CommandError)
+    }
+
+    fn compare_sector_count(&self, ext_csd: &[u8], test_csd: &[u8]) -> bool {
+        let sec_cnt_offset = EXT_CSD_SEC_CNT as usize;
+        for i in 0..4 {
+            if ext_csd[sec_cnt_offset + i] != test_csd[sec_cnt_offset + i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Perform HS200 tuning sequence (also used for HS400 initial tuning)
+    fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
+        let opcode = MMC_SEND_TUNING_BLOCK_HS200;
+        let timing = self.timing;
+
+        match timing {
+            // HS400 tuning must be issued in HS200 mode; reject direct HS400 timing
+            MMC_TIMING_MMC_HS400 => {
+                return Err(MmcHostErr::InvalidValue);
+            }
+            // HS200 timing: OK to proceed with tuning here
+            MMC_TIMING_MMC_HS200 => {
+                // HS400 re-tuning is not expected; leave periodic tuning disabled
+            }
+            // Any other timing mode is invalid for HS200 tuning
+            _ => {
+                return Err(MmcHostErr::InvalidValue);
+            }
+        }
+
+        // Set the EXEC_TUNING bit in Host Control2 to start tuning
+        let mut ctrl = self.host_ops().read_reg16(EMMC_HOST_CTRL2);
+        ctrl |= MMC_CTRL_EXEC_TUNING;
+        self.host_ops().write_reg16(EMMC_HOST_CTRL2, ctrl);
+
+        // Invoke the common tuning loop implementation
+        self.__emmc_execute_tuning(opcode)
+    }
+
+    /// Core tuning loop: send tuning blocks until the controller indicates success or timeout
+    fn __emmc_execute_tuning(&mut self, opcode: u8) -> MmcHostResult {
+        const MAX_TUNING_LOOP: usize = 40;
+
+        for _ in 0..MAX_TUNING_LOOP {
+            // Send one tuning block command
+            self.emmc_send_tuning(opcode)?;
+
+            // Read back Host Control2 to check tuning status
+            let ctrl = self.host_ops().read_reg16(EMMC_HOST_CTRL2);
+
+            // If the EXEC_TUNING bit has been cleared by hardware...
+            if (ctrl & MMC_CTRL_EXEC_TUNING) == 0 {
+                // ...and the TUNED_CLK bit is set, tuning succeeded
+                if (ctrl & MMC_CTRL_TUNED_CLK) != 0 {
+                    return Ok(());
+                }
+                // EXEC_TUNING cleared but no TUNED_CLK => break and report failure
+                break;
+            }
+        }
+
+        // Exceeded max loops without success: timeout
+        Err(MmcHostErr::Timeout)
+    }
+
+    /// Send a single tuning block read command over the SDHCI interface
+    fn emmc_send_tuning(&mut self, opcode: u8) -> MmcHostResult {
+        // Helper to pack DMA boundary and block size fields
+        let make_blksz = |dma: u16, blksz: u16| ((dma & 0x7) << 12) | (blksz & 0x0FFF);
+
+        // Determine current bus width (1/4/8 bits)
+        let bus_width = self.bus_width;
+
+        // Choose block size: 128 bytes for HS200 on 8-bit bus, else 64 bytes
+        let block_size = if opcode == MMC_SEND_TUNING_BLOCK_HS200 && bus_width == MMC_BUS_WIDTH_8BIT
+        {
+            128
+        } else {
+            64
+        };
+
+        // Program block size and enable DMA boundary
+        self.host_ops().write_reg16(EMMC_BLOCK_SIZE, make_blksz(7, block_size));
+        // Set transfer mode to single-block read
+        self.host_ops().write_reg16(EMMC_XFER_MODE, EMMC_TRNS_READ);
+
+        // Build and send the tuning command
+        let cmd = MmcCommand::new(opcode, 0, MMC_RSP_R1);
+        self.host_ops().send_command(&cmd, None).unwrap();
+
+        Ok(())
+    }
+
+    pub fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
+        let card_type = ext_csd[EXT_CSD_CARD_TYPE as usize] as u16;
+        let host_caps = self.host_caps;
+        let mut avail_type = 0;
+
+        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_26 != 0) {
+            avail_type |= EXT_CSD_CARD_TYPE_26;
+        }
+
+        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_52 != 0) {
+            avail_type |= EXT_CSD_CARD_TYPE_52;
+        }
+
+        if (host_caps & MMC_MODE_DDR_52MHZ != 0)
+            && (card_type & EXT_CSD_CARD_TYPE_DDR_1_8V as u16 != 0)
+        {
+            avail_type |= EXT_CSD_CARD_TYPE_DDR_1_8V as u16;
+        }
+
+        if (host_caps & MMC_MODE_HS200 != 0) && (card_type & EXT_CSD_CARD_TYPE_HS200_1_8V != 0) {
+            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V;
+        }
+
+        if (host_caps & MMC_MODE_HS400 != 0)
+            && (host_caps & MMC_MODE_8BIT != 0)
+            && (card_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
+        {
+            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V | EXT_CSD_CARD_TYPE_HS400_1_8V;
+        }
+
+        if (host_caps & MMC_MODE_HS400ES != 0)
+            && (host_caps & MMC_MODE_8BIT != 0)
+            && (ext_csd[EXT_CSD_STROBE_SUPPORT as usize] != 0)
+            && (avail_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
+        {
+            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V
+                | EXT_CSD_CARD_TYPE_HS400_1_8V
+                | EXT_CSD_CARD_TYPE_HS400ES;
+        }
+
+        avail_type
+    }
+
+    pub fn mmc_set_bus_speed(&mut self, avail_type: u32) {
+        let mut clock = 0;
+
+        if self.mmc_card_hs() {
+            clock = if (avail_type & EXT_CSD_CARD_TYPE_52 as u32) != 0 {
+                MMC_HIGH_52_MAX_DTR
+            } else {
+                MMC_HIGH_26_MAX_DTR
+            };
+        } else if self.mmc_card_hs200() {
+            clock = MMC_HS200_MAX_DTR;
+        }
+
+        self.host_ops_mut().mmc_set_clock(clock);
+    }
+
+    fn mmc_card_hs400es(&self) -> bool {
+        let timing = self.timing;
+        timing == MMC_TIMING_MMC_HS400ES
+    }
+
+    /// 检查卡是否为HS200模式
+    fn mmc_card_hs200(&self) -> bool {
+        let timing = self.timing;
+        timing == MMC_TIMING_MMC_HS200
+    }
+
+    /// 检查卡是否为HS模式
+    fn mmc_card_hs(&self) -> bool {
+        let timing = self.timing;
+        (timing == MMC_TIMING_MMC_HS) || (timing == MMC_TIMING_SD_HS)
     }
 
     pub fn init(&mut self) -> MmcHostResult {
