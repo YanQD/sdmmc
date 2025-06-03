@@ -1,7 +1,8 @@
 use super::{EMmcHost, constant::*};
 use crate::{
+    clock::emmc_set_clk,
     delay_us,
-    emmc::{aux::dll_lock_wo_tmout, clock::emmc_set_clk, config::EMmcChipConfig},
+    emmc::{aux::dll_lock_wo_tmout, config::EMmcChipConfig},
     err::SdError,
 };
 use log::{debug, info};

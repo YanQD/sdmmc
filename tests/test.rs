@@ -6,7 +6,7 @@ extern crate alloc;
 
 #[bare_test::tests]
 mod tests {
-    use alloc::{boxed::Box, vec::Vec};
+    use alloc::{boxed::Box, string::ToString, vec::Vec};
     use bare_test::{
         globals::{PlatformInfoKind, global_val},
         mem::iomap,
@@ -15,15 +15,14 @@ mod tests {
     };
     use dma_api::{DVec, Direction};
     use log::{info, warn};
-    use rk3568_clk::{cru_clksel_con28_bits::*, CRU};
-    use sdmmc::emmc::EMmcHost;
+    use rk3568_clk::{CRU, cru_clksel_con28_bits::*};
+    use sdmmc::{clock::*, embedded_mmc::{host::sdhci::rockship::SdhciHost, MmcHost}, emmc::EMmcHost};
     use sdmmc::emmc::constant::*;
     use sdmmc::{
         Kernel,
-        emmc::clock::{Clk, ClkError, init_global_clk},
         set_impl,
     };
-    
+
     /// 频率常量
     const MHZ: u32 = 1_000_000;
     const KHZ: u32 = 1_000;
@@ -144,26 +143,28 @@ mod tests {
 
     fn test_emmc(emmc_addr: usize, clock: usize) {
         // Initialize custom SDHCI controller
-        let mut emmc = EMmcHost::new(emmc_addr);
+        let sdhcihost = SdhciHost::new(emmc_addr);
+        let mut mmc = MmcHost::new("emmc".to_string(), sdhcihost);
+        // let mut mmc = EMmcHost::new(emmc_addr);
         let _ = init_clk(clock);
 
         // Try to initialize the SD card
-        match emmc.init() {
+        match mmc.init() {
             Ok(_) => {
                 println!("SD card initialization successful!");
 
-                // Get card information
-                match emmc.get_card_info() {
-                    Ok(card_info) => {
-                        println!("Card type: {:?}", card_info.card_type);
-                        println!("Manufacturer ID: 0x{:02X}", card_info.manufacturer_id);
-                        println!("Capacity: {} MB", card_info.capacity_bytes / (1024 * 1024));
-                        println!("Block size: {} bytes", card_info.block_size);
-                    }
-                    Err(e) => {
-                        warn!("Failed to get card info: {:?}", e);
-                    }
-                }
+                // // Get card information
+                // match emmc.get_card_info() {
+                //     Ok(card_info) => {
+                //         println!("Card type: {:?}", card_info.card_type);
+                //         println!("Manufacturer ID: 0x{:02X}", card_info.manufacturer_id);
+                //         println!("Capacity: {} MB", card_info.capacity_bytes / (1024 * 1024));
+                //         println!("Block size: {} bytes", card_info.block_size);
+                //     }
+                //     Err(e) => {
+                //         warn!("Failed to get card info: {:?}", e);
+                //     }
+                // }
 
                 // Test reading the first block
                 println!("Attempting to read first block...");
@@ -176,7 +177,7 @@ mod tests {
                     }
                 }
 
-                match emmc.read_blocks(5034498, 1, &mut buffer) {
+                match mmc.read_blocks(5034498, 1, &mut buffer) {
                     Ok(_) => {
                         println!("Successfully read first block!");
                         let block_bytes: Vec<u8> = (0..512).map(|i| buffer[i]).collect();
@@ -202,14 +203,14 @@ mod tests {
                     } else if #[cfg(feature = "pio")] {
                         let mut write_buffer: [u8; 512] = [0; 512];
                         for i in 0..512 {
-                            // write_buffer[i] = (i % 256) as u8; // Fill with test pattern data
-                            write_buffer[i] = 0 as u8;
+                            write_buffer[i] = (i % 256) as u8; // Fill with test pattern data
+                            // write_buffer[i] = 0 as u8;
                         }
                     }
                 }
 
                 // Write data
-                match emmc.write_blocks(test_block_id, 1, &write_buffer) {
+                match mmc.write_blocks(test_block_id, 1, &write_buffer) {
                     Ok(_) => {
                         println!("Successfully wrote to block {}!", test_block_id);
 
@@ -222,7 +223,7 @@ mod tests {
                             }
                         }
 
-                        match emmc.read_blocks(test_block_id, 1, &mut read_buffer) {
+                        match mmc.read_blocks(test_block_id, 1, &mut read_buffer) {
                             Ok(_) => {
                                 println!("Successfully read back block {}!", test_block_id);
 
@@ -277,7 +278,7 @@ mod tests {
                     }
                 }
 
-                match emmc.read_blocks(multi_block_addr, block_count, &mut multi_buffer) {
+                match mmc.read_blocks(multi_block_addr, block_count, &mut multi_buffer) {
                     Ok(_) => {
                         println!(
                             "Successfully read {} blocks starting at block address {}!",

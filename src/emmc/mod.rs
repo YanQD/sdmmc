@@ -8,7 +8,6 @@ mod regs;
 mod rockchip;
 
 pub mod aux;
-pub mod clock;
 pub mod constant;
 
 use crate::{delay_us, err::*};
@@ -607,9 +606,7 @@ impl EMmcHost {
             let tuning_result = self.mmc_hs200_tuning();
 
             // Optionally upgrade to HS400 mode if supported and using 8-bit bus
-            if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0
-                && self.bus_width == MMC_BUS_WIDTH_8BIT
-            {
+            if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0 && self.bus_width == MMC_BUS_WIDTH_8BIT {
                 // self.mmc_select_hs400()?; // Currently not executed
                 self.mmc_set_bus_speed(avail_type as u32);
             }
@@ -1002,9 +999,7 @@ impl EMmcHost {
         let mut retries = 3;
         let cmd = EMmcCommand::new(
             MMC_SWITCH,
-            (MMC_SWITCH_MODE_WRITE_BYTE << 24)
-                | (index << 16)
-                | ((value as u32) << 8),
+            (MMC_SWITCH_MODE_WRITE_BYTE << 24) | (index << 16) | ((value as u32) << 8),
             MMC_RSP_R1B,
         );
 

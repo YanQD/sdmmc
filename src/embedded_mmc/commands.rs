@@ -13,7 +13,7 @@ pub struct MmcCommand {
     pub data_present: bool,
     pub data_dir_read: bool,
     pub block_size: u16,
-    pub block_count: u16
+    pub block_count: u16,
 }
 
 impl MmcCommand {

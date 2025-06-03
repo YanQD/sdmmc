@@ -5,8 +5,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "dma")]
 use {
-    dma_api::DVec,
     crate::delay_us,
+    dma_api::DVec,
     log::{debug, info},
 };
 
@@ -451,74 +451,6 @@ impl EMmcHost {
             // Must send stop transmission command after multiple block write
             let stop_cmd = EMmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
             self.send_command(&stop_cmd, None)?;
-        }
-
-        Ok(())
-    }
-
-    /// Transfer data using PIO (Programmed I/O) mode
-    /// This function manually reads/writes data to/from the controller buffer
-    /// Parameters:
-    /// - data_dir_read: True for read operation, false for write
-    /// - buffer: Buffer to read data into or write data from
-    pub fn transfer_data_by_pio(
-        &self,
-        data_dir_read: bool,
-        buffer: &mut [u8],
-    ) -> Result<(), SdError> {
-        // Process data in 16-byte chunks (4 words at a time)
-        for i in (0..buffer.len()).step_by(16) {
-            if data_dir_read {
-                // Read operation: controller buffer -> memory
-                let mut values = [0u32; 4];
-                for j in 0..4 {
-                    if i + j * 4 < buffer.len() {
-                        // Read 32-bit word from controller buffer
-                        values[j] = self.read_reg(EMMC_BUF_DATA);
-
-                        if i + j * 4 + 3 < buffer.len() {
-                            // Unpack 32-bit word into 4 bytes in little-endian order
-                            buffer[i + j * 4] = (values[j] & 0xFF) as u8;
-                            buffer[i + j * 4 + 1] = ((values[j] >> 8) & 0xFF) as u8;
-                            buffer[i + j * 4 + 2] = ((values[j] >> 16) & 0xFF) as u8;
-                            buffer[i + j * 4 + 3] = ((values[j] >> 24) & 0xFF) as u8;
-                        }
-                    }
-                }
-
-                trace!(
-                    "0x{:08x}: 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}",
-                    buffer.as_ptr() as usize + i,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3]
-                );
-            } else {
-                // Write operation: memory -> controller buffer
-                let mut values = [0u32; 4];
-                for j in 0..4 {
-                    if i + j * 4 + 3 < buffer.len() {
-                        // Pack 4 bytes into 32-bit word in little-endian order
-                        values[j] = (buffer[i + j * 4] as u32)
-                            | ((buffer[i + j * 4 + 1] as u32) << 8)
-                            | ((buffer[i + j * 4 + 2] as u32) << 16)
-                            | ((buffer[i + j * 4 + 3] as u32) << 24);
-
-                        // Write 32-bit word to controller buffer
-                        self.write_reg(EMMC_BUF_DATA, values[j]);
-                    }
-                }
-
-                trace!(
-                    "0x{:08x}: 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}",
-                    buffer.as_ptr() as usize + i,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3]
-                );
-            }
         }
 
         Ok(())

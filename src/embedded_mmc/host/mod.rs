@@ -1,7 +1,5 @@
-// mod emmc;
-
-pub mod sdhci;
 pub mod constants;
+pub mod sdhci;
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -12,9 +10,9 @@ use log::info;
 use log::trace;
 use sdhci::rockship::SdhciHost;
 
+use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::panic;
-use alloc::vec::Vec;
 
 use crate::delay_us;
 use crate::embedded_mmc::aux::*;
@@ -27,11 +25,13 @@ use super::card::MmcCard;
 use super::commands::DataBuffer;
 use super::commands::MmcCommand;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmcHostErr {
     CommandError,
     Timeout,
     Unsupported,
     InvalidValue,
+    NotReady,
 }
 
 pub type MmcHostResult<T = ()> = Result<T, MmcHostErr>;
@@ -42,64 +42,86 @@ pub struct UDevice {
     pub compatible: Vec<String>,
 }
 
+pub struct MmcCurrent {
+    pub timing: u32,
+    pub bus_width: u8,
+    pub clock: u32,
+}
+
 pub struct MmcHost {
     pub name: String,
     pub card: Option<MmcCard>,
+    // pub current: Option<MmcCurrent>,
     pub host_ops: SdhciHost,
 }
 
 pub trait MmcHostOps: Debug + Send + Sync {
-    fn send_cmd(&self, cmd: &MmcCommand, data_buffer: Option<DataBuffer>,) -> MmcHostResult<()>;
-
+    fn send_cmd(&self, cmd: &MmcCommand, data_buffer: Option<DataBuffer>) -> MmcHostResult<()>;
     fn card_busy(&self) -> bool;
-
     fn set_ios(&self) -> MmcHostResult<()>;
-
     fn get_cd(&self) -> MmcHostResult<bool>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerState {
     // 控制器硬件状态
-    PowerOff,           // 控制器未上电
-    PowerOn,            // 控制器已上电但未初始化
-    Reset,              // 控制器正在复位
-    
+    PowerOff, // 控制器未上电
+    PowerOn,  // 控制器已上电但未初始化
+    Reset,    // 控制器正在复位
+
     // 卡片检测和初始化状态
-    Idle,               // 空闲状态，等待卡片插入
-    CardDetected,       // 检测到卡片插入
-    Identifying,        // 正在识别卡片类型
-    Initializing,       // 正在初始化卡片
-    
+    Idle,         // 空闲状态，等待卡片插入
+    CardDetected, // 检测到卡片插入
+    Identifying,  // 正在识别卡片类型
+    Initializing, // 正在初始化卡片
+
     // 数据传输状态
-    Ready,              // 准备就绪，可以执行命令
-    CommandActive,      // 正在执行命令
-    DataTransfer,       // 正在进行数据传输
-    DataTransferRead,   // 正在读取数据
-    DataTransferWrite,  // 正在写入数据
-    
+    Ready,             // 准备就绪，可以执行命令
+    CommandActive,     // 正在执行命令
+    DataTransfer,      // 正在进行数据传输
+    DataTransferRead,  // 正在读取数据
+    DataTransferWrite, // 正在写入数据
+
     // 错误和恢复状态
-    Error,              // 发生错误
-    Timeout,            // 命令或数据传输超时
-    CrcError,           // CRC错误
-    Recovering,         // 正在恢复
-    
+    Error,      // 发生错误
+    Timeout,    // 命令或数据传输超时
+    CrcError,   // CRC错误
+    Recovering, // 正在恢复
+
     // 特殊操作状态
-    Tuning,             // 正在进行时序调整（用于高速模式）
-    Switching,          // 正在切换工作模式（电压、时序等）
-    
+    Tuning,    // 正在进行时序调整（用于高速模式）
+    Switching, // 正在切换工作模式（电压、时序等）
+
     // 低功耗状态
-    Suspended,          // 挂起状态
-    Sleep,              // 卡片进入睡眠模式
+    Suspended, // 挂起状态
+    Sleep,     // 卡片进入睡眠模式
 }
 
 impl MmcHost {
-    fn new(name: String, host_ops: SdhciHost) -> Self {
+    pub fn new(name: String, host_ops: SdhciHost) -> Self {
         MmcHost {
             name,
             card: None,
+            // current: None,
             host_ops,
         }
+    }
+
+    pub fn init(&mut self) -> MmcHostResult {
+        info!("eMMC host initialization started");
+
+        self.host_ops_mut().init_host().unwrap();
+
+        if self.is_card_present() {
+            let mmc_card = MmcCard::new();
+            self.add_card(mmc_card);
+            self.init_card()?;
+        }
+
+        
+
+        info!("eMMC host initialization complete");
+        Ok(())
     }
 
     fn add_card(&mut self, card: MmcCard) {
@@ -113,6 +135,14 @@ impl MmcHost {
     fn card_mut(&mut self) -> Option<&mut MmcCard> {
         self.card.as_mut()
     }
+
+    // fn current(&self) -> Option<&MmcCurrent> {
+    //     self.current.as_ref()
+    // }
+
+    // fn current_mut(&mut self) -> Option<&mut MmcCurrent> {
+    //     self.current.as_mut()
+    // }
 
     fn host_ops(&self) -> &SdhciHost {
         &self.host_ops
@@ -131,6 +161,13 @@ impl MmcHost {
 
         info!("eMMC reset complete");
         Ok(())
+    }
+
+    // Check if card is present
+    fn is_card_present(&self) -> bool {
+        let state = self.host_ops().read_reg32(EMMC_PRESENT_STATE);
+        // debug!("EMMC Present State: {:#b}", state);
+        (state & EMMC_CARD_INSERTED) != 0 && ((state & EMMC_CARD_STABLE) != 0)
     }
 
     // Send CMD1 to set OCR and check if card is ready
@@ -166,25 +203,26 @@ impl MmcHost {
             let resp = self.host_ops().get_response().as_r3();
             card_ocr = resp;
 
-            info!("CMD1 response raw: {:#x}", self.host_ops().read_reg32(EMMC_RESPONSE));
+            info!(
+                "CMD1 response raw: {:#x}",
+                self.host_ops().read_reg32(EMMC_RESPONSE)
+            );
             info!("eMMC CMD1 response: {:#x}", resp);
 
             // Update card OCR
-            {
-                let card = self.card_mut().unwrap();
-                card.base_info_mut().set_ocr(resp);
+            let card = self.card_mut().unwrap();
+            card.base_info_mut().set_ocr(resp);
 
-                // Check if card is ready (OCR_BUSY flag set)
-                if (resp & ocr_busy) != 0 {
-                    ready = true;
-                    if (resp & ocr_hcs) != 0 {
-                        card.set_card_type(CardType::Mmc);
-                        card.set_cardext(CardExt::new(CardType::Mmc));
+            // Check if card is ready (OCR_BUSY flag set)
+            if (resp & ocr_busy) != 0 {
+                ready = true;
+                if (resp & ocr_hcs) != 0 {
+                    card.set_card_type(CardType::Mmc);
+                    card.set_cardext(CardExt::new(CardType::Mmc));
 
-                        let cardext_mut = card.cardext_mut().unwrap();
-                        let mmc_ext = cardext_mut.as_mut_mmc().unwrap();
-                        mmc_ext.state |= MMC_STATE_HIGHCAPACITY;
-                    }
+                    let cardext_mut = card.cardext_mut().unwrap();
+                    let mmc_ext = cardext_mut.as_mut_mmc().unwrap();
+                    mmc_ext.state |= MMC_STATE_HIGHCAPACITY;
                 }
             }
 
@@ -227,7 +265,7 @@ impl MmcHost {
     }
 
     // Send CMD3 to set RCA for eMMC
-    pub fn mmc_set_relative_addr(&self) -> MmcHostResult<> {
+    pub fn mmc_set_relative_addr(&self) -> MmcHostResult {
         // Get the RCA value before borrowing the card
         let card = self.card().unwrap();
         let rca = card.base_info().rca();
@@ -263,7 +301,9 @@ impl MmcHost {
             true,
         );
 
-        self.host_ops().send_command(&cmd, Some(DataBuffer::Read(ext_csd))).unwrap();
+        self.host_ops()
+            .send_command(&cmd, Some(DataBuffer::Read(ext_csd)))
+            .unwrap();
 
         // debug!("CMD8: {:#x}",self.get_response().as_r1());
         // debug!("EXT_CSD read successfully, rev: {}", ext_csd[EXT_CSD_REV as usize]);
@@ -272,19 +312,11 @@ impl MmcHost {
     }
 
     // Send CMD6 to switch modes
-    fn mmc_switch(
-        &self,
-        _set: u8,
-        index: u32,
-        value: u8,
-        send_status: bool,
-    ) -> MmcHostResult {
+    fn mmc_switch(&self, _set: u8, index: u32, value: u8, send_status: bool) -> MmcHostResult {
         let mut retries = 3;
         let cmd = MmcCommand::new(
             MMC_SWITCH,
-            (MMC_SWITCH_MODE_WRITE_BYTE << 24)
-                | (index << 16)
-                | ((value as u32) << 8),
+            (MMC_SWITCH_MODE_WRITE_BYTE << 24) | (index << 16) | ((value as u32) << 8),
             MMC_RSP_R1B,
         );
 
@@ -313,11 +345,7 @@ impl MmcHost {
 
         while busy {
             if send_status {
-                let cmd = MmcCommand::new(
-                    MMC_SEND_STATUS,
-                    rca << 16,
-                    MMC_RSP_R1,
-                );
+                let cmd = MmcCommand::new(MMC_SEND_STATUS, rca << 16, MMC_RSP_R1);
                 self.host_ops().send_command(&cmd, None).unwrap();
                 let response = self.host_ops().get_response().as_r1();
                 trace!("cmd_d {:#x}", response);
@@ -330,7 +358,7 @@ impl MmcHost {
                     break;
                 }
             } else {
-                busy = self.mmc_card_busy();
+                busy = self.host_ops().mmc_card_busy();
             }
 
             if timeout == 0 && busy {
@@ -359,12 +387,6 @@ impl MmcHost {
         ret
     }
 
-    pub fn mmc_card_busy(&self) -> bool {
-        let present_state = self.host_ops().read_reg32(EMMC_PRESENT_STATE);
-        // 检查DATA[0]线是否为0（低电平表示忙）
-        !(present_state & EMMC_DATA_0_LVL != 0)
-    }
-
     // cmd4 - Set DSR (Driver Stage Register)
     pub fn mmc_set_dsr(&mut self, dsr: u32) -> MmcHostResult {
         // Set DSR (Driver Stage Register) value
@@ -381,7 +403,7 @@ impl MmcHost {
         // CMD7: Select the card
         let cmd = MmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1);
         self.host_ops().send_command(&cmd, None).unwrap();
-        
+
         debug!("cmd7: {:#x}", self.host_ops().get_response().as_r1());
 
         Ok(())
@@ -399,17 +421,15 @@ impl MmcHost {
         let retry = 100;
         let ocr = self.mmc_send_op_cond(ocr, retry)?;
         let high_capacity = (ocr & OCR_HCS) == OCR_HCS;
-        
-        {
-            let card_mut = self.card_mut().unwrap();
 
-            // Set RCA (Relative Card Address)
-            card_mut.base_info_mut().set_rca(1);
+        let card_mut = self.card_mut().unwrap();
 
-            // Determine if card is high capacity (SDHC/SDXC/eMMC)
-            card_mut.base_info_mut().set_high_capacity(high_capacity);
-        }
-    
+        // Set RCA (Relative Card Address)
+        card_mut.base_info_mut().set_rca(1);
+
+        // Determine if card is high capacity (SDHC/SDXC/eMMC)
+        card_mut.base_info_mut().set_high_capacity(high_capacity);
+
         // CMD2: Request CID (Card Identification)
         let _cid = self.mmc_all_send_cid()?;
 
@@ -424,7 +444,7 @@ impl MmcHost {
             let card_mut = self.card_mut().unwrap();
             card_mut.base_info().card_version()
         };
-        
+
         if card_version == MMC_VERSION_UNKNOWN {
             let card_mut = self.card_mut().unwrap();
             let csd_version = (card_mut.base_info().csd()[0] >> 26) & 0xf;
@@ -452,9 +472,12 @@ impl MmcHost {
             } else if card_type == CardType::SdV1 || card_type == CardType::SdV2 {
                 read_bl_len
             } else {
-                panic!("Unsupported card type for write block length: {:?}", card_type);
+                panic!(
+                    "Unsupported card type for write block length: {:?}",
+                    card_type
+                );
             };
-            
+
             let high_capacity = card_mut.base_info().high_capacity();
             let (csize, cmult) = if high_capacity {
                 ((csd[1] & 0x3f) << 16 | (csd[2] & 0xffff0000) >> 16, 8)
@@ -495,12 +518,12 @@ impl MmcHost {
 
         // Set initial erase group size and partition config
         card_mut.base_info_mut().set_erase_grp_size(1);
-        card_mut.base_info_mut().set_part_config(MMCPART_NOAVAILABLE);
+        card_mut
+            .base_info_mut()
+            .set_part_config(MMCPART_NOAVAILABLE);
 
         if dsr_needed {
-            let dsr_value = {
-                (dsr & 0xffff) << 16
-            };
+            let dsr_value = { (dsr & 0xffff) << 16 };
             self.mmc_set_dsr(dsr_value)?;
         }
 
@@ -539,8 +562,7 @@ impl MmcHost {
                     | (ext_csd[EXT_CSD_SEC_CNT as usize + 3] as u64) << 24;
                 capacity *= MMC_MAX_BLOCK_LEN as u64;
                 if (capacity >> 20) > 2 * 1024 {
-
-                    capacity_user  = capacity;
+                    capacity_user = capacity;
                 }
 
                 let card = self.card_mut().unwrap();
@@ -564,7 +586,10 @@ impl MmcHost {
             if (ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize] as u32 & PART_SUPPORT != 0)
                 || ext_csd[EXT_CSD_BOOT_MULT as usize] != 0
             {
-                self.card_mut().unwrap().base_info_mut().set_part_config(ext_csd[EXT_CSD_PART_CONF as usize]);
+                self.card_mut()
+                    .unwrap()
+                    .base_info_mut()
+                    .set_part_config(ext_csd[EXT_CSD_PART_CONF as usize]);
             }
 
             // Check secure erase support
@@ -596,23 +621,20 @@ impl MmcHost {
                 capacity_gp[i] *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
                 capacity_gp[i] *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
                 capacity_gp[i] <<= 19;
-                
             }
             debug!("GP partition sizes: {:?}", capacity_gp);
 
             let (mut enh_user_size, mut enh_user_start) = (0, 0);
             // Calculate enhanced user data size and start
             if part_completed {
-                enh_user_size = ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 2] as u64)
-                    << 16)
+                enh_user_size = ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 2] as u64) << 16)
                     + ((ext_csd[EXT_CSD_ENH_SIZE_MULT as usize + 1] as u64) << 8)
                     + (ext_csd[EXT_CSD_ENH_SIZE_MULT as usize] as u64);
                 enh_user_size *= ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64;
                 enh_user_size *= ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64;
                 enh_user_size <<= 19;
-                
-                enh_user_start = ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 3] as u64)
-                    << 24)
+
+                enh_user_start = ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 3] as u64) << 24)
                     + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 2] as u64) << 16)
                     + ((ext_csd[EXT_CSD_ENH_START_ADDR as usize + 1] as u64) << 8)
                     + (ext_csd[EXT_CSD_ENH_START_ADDR as usize] as u64);
@@ -658,15 +680,24 @@ impl MmcHost {
             } else {
                 let erase_gsz = (csd[2] & 0x00007c00) >> 10;
                 let erase_gmul = (csd[2] & 0x000003e0) >> 5;
-                self.card_mut().unwrap().base_info_mut().set_erase_grp_size((erase_gsz + 1) * (erase_gmul + 1));
+                self.card_mut()
+                    .unwrap()
+                    .base_info_mut()
+                    .set_erase_grp_size((erase_gsz + 1) * (erase_gmul + 1));
             }
 
             // Set high-capacity write-protect group size
             let hc_wp_grp_size = 1024
                 * (ext_csd[EXT_CSD_HC_ERASE_GRP_SIZE as usize] as u64)
                 * (ext_csd[EXT_CSD_HC_WP_GRP_SIZE as usize] as u64);
-            
-            let mmc_ext = self.card_mut().unwrap().cardext_mut().unwrap().as_mut_mmc().unwrap();
+
+            let mmc_ext = self
+                .card_mut()
+                .unwrap()
+                .cardext_mut()
+                .unwrap()
+                .as_mut_mmc()
+                .unwrap();
             mmc_ext.part_support = ext_csd[EXT_CSD_PARTITIONING_SUPPORT as usize];
             mmc_ext.capacity_boot = capacity_boot;
             mmc_ext.capacity_rpmb = capacity_rpmb;
@@ -701,22 +732,24 @@ impl MmcHost {
         let card_mut = self.card_mut().unwrap();
         let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
         match part_num {
-            0 =>  {
-                let capacity_user =mmc_ext.capacity_user;
+            0 => {
+                let capacity_user = mmc_ext.capacity_user;
                 card_mut.base_info_mut().set_capacity(capacity_user);
-            },
+            }
             1 | 2 => {
                 let capacity_boot = mmc_ext.capacity_boot;
                 card_mut.base_info_mut().set_capacity(capacity_boot);
-            },
+            }
             3 => {
-                let capacity_rpmb = mmc_ext.capacity_rpmb; 
+                let capacity_rpmb = mmc_ext.capacity_rpmb;
                 card_mut.base_info_mut().set_capacity(capacity_rpmb);
-            },
+            }
             4..=7 => {
                 let capacity_gp = mmc_ext.capacity_gp;
-                card_mut.base_info_mut().set_capacity(capacity_gp[(part_num - 4) as usize]);
-            },
+                card_mut
+                    .base_info_mut()
+                    .set_capacity(capacity_gp[(part_num - 4) as usize]);
+            }
             _ => return Err(MmcHostErr::InvalidValue),
         }
 
@@ -725,11 +758,11 @@ impl MmcHost {
         let _lba = lldiv(capacity, read_bl_len);
 
         Ok(())
-    }  
+    }
 
     pub fn mmc_change_freq(&mut self) -> MmcHostResult {
         let card_mut = self.card_mut().unwrap();
-        let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
+        // let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
         // Allocate buffer for EXT_CSD depending on whether DMA or PIO is enabled
         cfg_if::cfg_if! {
             if #[cfg(feature = "dma")] {
@@ -740,10 +773,10 @@ impl MmcHost {
         }
 
         // Initialize card capabilities flags
-        self.set_card_caps(0).unwrap();
+        card_mut.base_info_mut().set_card_caps(0);
 
         // Get card version (default to 0 if not available)
-        let version = self.version().unwrap_or(0);
+        let version = card_mut.base_info().card_version();
 
         // Only cards version 4.0 and above support high-speed modes
         if version < MMC_VERSION_4 {
@@ -751,13 +784,15 @@ impl MmcHost {
         }
 
         // Enable both 4-bit and 8-bit modes on the card
-        self.set_card_caps(MMC_MODE_4BIT | MMC_MODE_8BIT).unwrap();
+        card_mut
+            .base_info_mut()
+            .set_card_caps(MMC_MODE_4BIT | MMC_MODE_8BIT);
 
         // Read the EXT_CSD register from the card
         self.mmc_send_ext_csd(&mut ext_csd)?;
 
         // Determine supported high-speed modes from EXT_CSD
-        let avail_type = self.mmc_select_card_type(&ext_csd);
+        let avail_type = self.host_ops().mmc_select_card_type(&ext_csd);
 
         // Select the appropriate high-speed mode supported by both host and card
         let result = if avail_type & EXT_CSD_CARD_TYPE_HS200 != 0 {
@@ -774,22 +809,21 @@ impl MmcHost {
         result?;
 
         // Configure the bus speed according to selected type
-        self.mmc_set_bus_speed(avail_type as u32);
+        self.host_ops_mut().mmc_set_bus_speed(avail_type as u32);
 
         // If HS200 mode was selected, perform tuning procedure
-        if self.mmc_card_hs200() {
-            let tuning_result = self.mmc_hs200_tuning();
+        if self.host_ops().mmc_card_hs200() {
+            let tuning_result = self.host_ops_mut().mmc_hs200_tuning();
 
             // Optionally upgrade to HS400 mode if supported and using 8-bit bus
-            if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0
-                && self.bus_width == MMC_BUS_WIDTH_8BIT
-            {
+            let bus_width = self.host_ops().bus_width;
+            if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0 && bus_width == MMC_BUS_WIDTH_8BIT {
                 // self.mmc_select_hs400()?; // Currently not executed
-                self.mmc_set_bus_speed(avail_type as u32);
+                self.host_ops_mut().mmc_set_bus_speed(avail_type as u32);
             }
 
-            tuning_result
-        } else if !self.mmc_card_hs400es() {
+            tuning_result.map_err(|_| MmcHostErr::CommandError)
+        } else if !self.host_ops().mmc_card_hs400es() {
             // If not in HS400 Enhanced Stroxbe mode, try to switch bus width
             let width_result = self.mmc_select_bus_width()?;
             let err = if width_result > 0 {
@@ -842,16 +876,16 @@ impl MmcHost {
             }
         }
 
-        // 版本检查和主机能力检查
-        if self.version().unwrap_or(0) < MMC_VERSION_4
-            || (self.host_caps & (MMC_MODE_4BIT | MMC_MODE_8BIT)) == 0
-        {
+        // Check if host supports 4-bit or 8-bit bus width
+        let host_caps = self.host_ops().host_caps;
+        let version = self.card().unwrap().base_info().card_version();
+        if version < MMC_VERSION_4 || (host_caps & (MMC_MODE_4BIT | MMC_MODE_8BIT)) == 0 {
             return Ok(0);
         }
 
         self.mmc_send_ext_csd(&mut ext_csd)?;
 
-        let mut idx = if (self.host_caps & MMC_MODE_8BIT) != 0 {
+        let mut idx = if (host_caps & MMC_MODE_8BIT) != 0 {
             0
         } else {
             1
@@ -870,7 +904,8 @@ impl MmcHost {
             }
 
             let bus_width = bus_widths[idx];
-            self.mmc_set_bus_width(bus_width);
+
+            self.host_ops_mut().mmc_set_bus_width(bus_width);
 
             // 再次读取EXT_CSD进行验证
             let test_result = self.mmc_send_ext_csd(&mut test_csd);
@@ -907,172 +942,149 @@ impl MmcHost {
         true
     }
 
-    /// Perform HS200 tuning sequence (also used for HS400 initial tuning)
-    fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
-        let opcode = MMC_SEND_TUNING_BLOCK_HS200;
-        let timing = self.timing;
-
-        match timing {
-            // HS400 tuning must be issued in HS200 mode; reject direct HS400 timing
-            MMC_TIMING_MMC_HS400 => {
-                return Err(MmcHostErr::InvalidValue);
-            }
-            // HS200 timing: OK to proceed with tuning here
-            MMC_TIMING_MMC_HS200 => {
-                // HS400 re-tuning is not expected; leave periodic tuning disabled
-            }
-            // Any other timing mode is invalid for HS200 tuning
-            _ => {
-                return Err(MmcHostErr::InvalidValue);
-            }
-        }
-
-        // Set the EXEC_TUNING bit in Host Control2 to start tuning
-        let mut ctrl = self.host_ops().read_reg16(EMMC_HOST_CTRL2);
-        ctrl |= MMC_CTRL_EXEC_TUNING;
-        self.host_ops().write_reg16(EMMC_HOST_CTRL2, ctrl);
-
-        // Invoke the common tuning loop implementation
-        self.__emmc_execute_tuning(opcode)
+    // Check if card is write protected
+    fn is_write_protected(&self) -> bool {
+        let state = self.host_ops().read_reg32(EMMC_PRESENT_STATE);
+        (state & EMMC_WRITE_PROTECT) != 0
     }
 
-    /// Core tuning loop: send tuning blocks until the controller indicates success or timeout
-    fn __emmc_execute_tuning(&mut self, opcode: u8) -> MmcHostResult {
-        const MAX_TUNING_LOOP: usize = 40;
+    /// Read blocks from SD card using PIO (Programmed I/O) mode
+    /// Parameters:
+    /// - block_id: Starting block address to read from
+    /// - blocks: Number of blocks to read
+    /// - buffer: Buffer to store the read data
+    #[cfg(feature = "pio")]
+    pub fn read_blocks(&self, block_id: u32, blocks: u16, buffer: &mut [u8]) -> MmcHostResult {
+        trace!(
+            "pio read_blocks: block_id = {}, blocks = {}",
+            block_id, blocks
+        );
 
-        for _ in 0..MAX_TUNING_LOOP {
-            // Send one tuning block command
-            self.emmc_send_tuning(opcode)?;
-
-            // Read back Host Control2 to check tuning status
-            let ctrl = self.host_ops().read_reg16(EMMC_HOST_CTRL2);
-
-            // If the EXEC_TUNING bit has been cleared by hardware...
-            if (ctrl & MMC_CTRL_EXEC_TUNING) == 0 {
-                // ...and the TUNED_CLK bit is set, tuning succeeded
-                if (ctrl & MMC_CTRL_TUNED_CLK) != 0 {
-                    return Ok(());
-                }
-                // EXEC_TUNING cleared but no TUNED_CLK => break and report failure
-                break;
-            }
-        }
-
-        // Exceeded max loops without success: timeout
-        Err(MmcHostErr::Timeout)
-    }
-
-    /// Send a single tuning block read command over the SDHCI interface
-    fn emmc_send_tuning(&mut self, opcode: u8) -> MmcHostResult {
-        // Helper to pack DMA boundary and block size fields
-        let make_blksz = |dma: u16, blksz: u16| ((dma & 0x7) << 12) | (blksz & 0x0FFF);
-
-        // Determine current bus width (1/4/8 bits)
-        let bus_width = self.bus_width;
-
-        // Choose block size: 128 bytes for HS200 on 8-bit bus, else 64 bytes
-        let block_size = if opcode == MMC_SEND_TUNING_BLOCK_HS200 && bus_width == MMC_BUS_WIDTH_8BIT
-        {
-            128
-        } else {
-            64
+        // Check if card is initialized
+        match &self.card {
+            Some(card) => card,
+            None => return Err(MmcHostErr::NotReady),
         };
 
-        // Program block size and enable DMA boundary
-        self.host_ops().write_reg16(EMMC_BLOCK_SIZE, make_blksz(7, block_size));
-        // Set transfer mode to single-block read
-        self.host_ops().write_reg16(EMMC_XFER_MODE, EMMC_TRNS_READ);
+        let card = self.card().unwrap();
+        let card_state = if card.card_type() == CardType::Mmc {
+            card.cardext().unwrap().as_mmc().unwrap().state
+        } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
+            card.cardext().unwrap().as_sd().unwrap().state
+        } else {
+            return Err(MmcHostErr::InvalidValue);
+        };
 
-        // Build and send the tuning command
-        let cmd = MmcCommand::new(opcode, 0, MMC_RSP_R1);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        // Adjust block address based on card type
+        // High capacity cards use block addressing, standard capacity cards use byte addressing
+        let card_addr = if card_state & MMC_STATE_HIGHCAPACITY != 0 {
+            block_id // High capacity card: use block address directly
+        } else {
+            block_id * 512 // Standard capacity card: convert to byte address
+        };
+
+        trace!(
+            "Reading {} blocks starting at address: {:#x}",
+            blocks, card_addr
+        );
+
+        if blocks == 1 {
+            // Single block read operation
+            let cmd = MmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, 1, true);
+            self.host_ops()
+                .send_command(&cmd, Some(DataBuffer::Read(buffer)))
+                .unwrap();
+        } else {
+            // Multiple block read operation
+            let cmd = MmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, blocks, true);
+
+            info!(
+                "Sending multiple block read command: {:?}, blocks: {}",
+                cmd, blocks
+            );
+
+            self.host_ops()
+                .send_command(&cmd, Some(DataBuffer::Read(buffer)))
+                .unwrap();
+
+            // Must send stop transmission command after multiple block read
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.host_ops().send_command(&stop_cmd, None).unwrap();
+        }
 
         Ok(())
     }
 
-    pub fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
-        let card_type = ext_csd[EXT_CSD_CARD_TYPE as usize] as u16;
-        let host_caps = self.host_caps;
-        let mut avail_type = 0;
+    /// Write blocks to SD card using PIO (Programmed I/O) mode
+    /// Parameters:
+    /// - block_id: Starting block address to write to
+    /// - blocks: Number of blocks to write
+    /// - buffer: Buffer containing data to write
+    #[cfg(feature = "pio")]
+    pub fn write_blocks(&self, block_id: u32, blocks: u16, buffer: &[u8]) -> MmcHostResult {
+        use log::trace;
 
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_26 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_26;
+        trace!(
+            "pio write_blocks: block_id = {}, blocks = {}",
+            block_id, blocks
+        );
+
+        // Check if card is initialized
+        match &self.card {
+            Some(card) => card,
+            None => return Err(MmcHostErr::NotReady),
+        };
+
+        // Check if card is write protected
+        if self.is_write_protected() {
+            return Err(MmcHostErr::NotReady);
         }
 
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_52 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_52;
+        let card = self.card().unwrap();
+        let card_state = if card.card_type() == CardType::Mmc {
+            card.cardext().unwrap().as_mmc().unwrap().state
+        } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
+            card.cardext().unwrap().as_sd().unwrap().state
+        } else {
+            return Err(MmcHostErr::InvalidValue);
+        };
+
+        // Determine the correct address based on card capacity type
+        let card_addr = if card_state & MMC_STATE_HIGHCAPACITY != 0 {
+            block_id // High capacity card: use block address directly
+        } else {
+            block_id * 512 // Standard capacity card: convert to byte address
+        };
+
+        trace!(
+            "Writing {} blocks starting at address: {:#x}",
+            blocks, card_addr
+        );
+
+        // Select appropriate command based on number of blocks
+        if blocks == 1 {
+            // Single block write operation
+            let cmd =
+                MmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false);
+            self.host_ops()
+                .send_command(&cmd, Some(DataBuffer::Write(buffer)))
+                .unwrap();
+        } else {
+            // Multiple block write operation
+            let cmd = MmcCommand::new(MMC_WRITE_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, blocks, false);
+
+            self.host_ops()
+                .send_command(&cmd, Some(DataBuffer::Write(buffer)))
+                .unwrap();
+
+            // Must send stop transmission command after multiple block write
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.host_ops().send_command(&stop_cmd, None).unwrap();
         }
 
-        if (host_caps & MMC_MODE_DDR_52MHZ != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_DDR_1_8V as u16 != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_DDR_1_8V as u16;
-        }
-
-        if (host_caps & MMC_MODE_HS200 != 0) && (card_type & EXT_CSD_CARD_TYPE_HS200_1_8V != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400 != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V | EXT_CSD_CARD_TYPE_HS400_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400ES != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (ext_csd[EXT_CSD_STROBE_SUPPORT as usize] != 0)
-            && (avail_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V
-                | EXT_CSD_CARD_TYPE_HS400_1_8V
-                | EXT_CSD_CARD_TYPE_HS400ES;
-        }
-
-        avail_type
-    }
-
-    pub fn mmc_set_bus_speed(&mut self, avail_type: u32) {
-        let mut clock = 0;
-
-        if self.mmc_card_hs() {
-            clock = if (avail_type & EXT_CSD_CARD_TYPE_52 as u32) != 0 {
-                MMC_HIGH_52_MAX_DTR
-            } else {
-                MMC_HIGH_26_MAX_DTR
-            };
-        } else if self.mmc_card_hs200() {
-            clock = MMC_HS200_MAX_DTR;
-        }
-
-        self.host_ops_mut().mmc_set_clock(clock);
-    }
-
-    fn mmc_card_hs400es(&self) -> bool {
-        let timing = self.timing;
-        timing == MMC_TIMING_MMC_HS400ES
-    }
-
-    /// 检查卡是否为HS200模式
-    fn mmc_card_hs200(&self) -> bool {
-        let timing = self.timing;
-        timing == MMC_TIMING_MMC_HS200
-    }
-
-    /// 检查卡是否为HS模式
-    fn mmc_card_hs(&self) -> bool {
-        let timing = self.timing;
-        (timing == MMC_TIMING_MMC_HS) || (timing == MMC_TIMING_SD_HS)
-    }
-
-    pub fn init(&mut self) -> MmcHostResult {
-        info!("eMMC host initialization started");
-
-        self.host_ops_mut().init_host().unwrap();
-
-
-        info!("eMMC host initialization complete");
         Ok(())
     }
 }

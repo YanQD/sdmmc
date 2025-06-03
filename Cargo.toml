@@ -31,7 +31,7 @@ byte-unit = { version = "5.1.6", default-features = false, features = ["byte"] }
 rk3568_clk = { git = "https://github.com/arceos-hypervisor/rk3568_clk.git" }
 
 [build-dependencies]
-bare-test-macros = "0.0.1"
+bare-test-macros = "0.2.0"
 
 [[test]]
 name = "test"

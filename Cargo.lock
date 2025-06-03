@@ -88,22 +88,11 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7dfcf95987c500af4665d8a18adbc5e7d3177a2537964f48002b88e28fb055e"
 dependencies = [
- "bare-test-macros 0.2.0",
+ "bare-test-macros",
  "log",
  "sparreal-kernel",
  "sparreal-macros 0.9.0",
  "sparreal-rt",
-]
-
-[[package]]
-name = "bare-test-macros"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d6f42aee6d91e826a85847fbf1c87ea711dcceb4feade4ceb44e657ca1e6af1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -486,7 +475,7 @@ version = "0.1.0"
 source = "git+https://github.com/arceos-hypervisor/rk3568_clk.git#2b63818f9f9f576d99988fafa70de41112524e00"
 dependencies = [
  "aarch64-cpu",
- "bare-test-macros 0.2.0",
+ "bare-test-macros",
  "fdt-parser",
  "kspin",
  "log",
@@ -515,7 +504,7 @@ dependencies = [
  "aarch64-cpu",
  "arm_pl011",
  "bare-test",
- "bare-test-macros 0.0.1",
+ "bare-test-macros",
  "bitflags",
  "byte-unit",
  "cfg-if",

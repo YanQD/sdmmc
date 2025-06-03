@@ -46,9 +46,5 @@ fn do_div(n: &mut u64, base: u32) -> u32 {
 }
 
 pub fn generic_fls(x: u32) -> u32 {
-    if x == 0 {
-        0
-    } else {
-        32 - x.leading_zeros()
-    }
+    if x == 0 { 0 } else { 32 - x.leading_zeros() }
 }

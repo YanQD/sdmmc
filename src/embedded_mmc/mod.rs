@@ -3,7 +3,9 @@
 
 mod aux;
 mod card;
-mod host;
+pub mod host;
 
-pub mod regs;
 pub mod commands;
+pub mod regs;
+
+pub use host::MmcHost;

@@ -1,7 +1,15 @@
-use core::fmt::Display;
-use log::{debug, info, trace};
+use core::{fmt::Display, sync::atomic::{fence, Ordering}};
+use log::{debug, info, trace, warn};
 
-use crate::{delay_us, embedded_mmc::{aux::generic_fls, commands::{DataBuffer, MmcCommand, MmcResponse}, host::{constants::*, sdhci::SdhciError}}, impl_register_ops};
+use crate::{
+    delay_us,
+    embedded_mmc::{
+        aux::generic_fls,
+        commands::{DataBuffer, MmcCommand, MmcResponse},
+        host::{constants::*, sdhci::SdhciError},
+    },
+    impl_register_ops,
+};
 
 use super::SdhciResult;
 
@@ -40,6 +48,22 @@ impl Display for SdhciHost {
 impl_register_ops!(SdhciHost, base_addr);
 
 impl SdhciHost {
+    pub fn new(base_addr: usize) -> Self {
+        SdhciHost {
+            base_addr,
+            caps: 0,
+            clock_base: 0,
+            voltages: 0,
+            quirks: 0,
+            host_caps: 0,
+            version: 0,
+
+            timing: MMC_TIMING_LEGACY,
+            bus_width: 1, // Default to 1-bit bus width
+            clock: 400000, // Default to 400 kHz
+        }
+    }
+
     // Initialize the host controller
     pub fn init_host(&mut self) -> SdhciResult {
         info!("Init EMMC Controller");
@@ -52,7 +76,7 @@ impl SdhciHost {
         self.version = version;
         info!("EMMC Version: 0x{:x}", version);
 
-        let caps1 = self.read_reg32(EMMC_HOST_CNTRL_VER);
+        let caps1 = self.read_reg32(EMMC_CAPABILITIES1);
         info!("EMMC Capabilities 1: 0b{:b}", caps1);
 
         let mut clk_mul: u32 = 0;
@@ -237,19 +261,17 @@ impl SdhciHost {
                 mode |= EMMC_TRNS_READ;
             }
 
-            {
-                self.write_reg16(
-                    EMMC_BLOCK_SIZE,
-                    (cmd.block_size & 0xFFF).try_into().unwrap(),
-                );
-                self.write_reg16(EMMC_BLOCK_COUNT, cmd.block_count);
+            self.write_reg16(
+                EMMC_BLOCK_SIZE,
+                (cmd.block_size & 0xFFF).try_into().unwrap(),
+            );
+            self.write_reg16(EMMC_BLOCK_COUNT, cmd.block_count);
 
-                self.write_reg16(EMMC_XFER_MODE, mode);
-                match data_buffer {
-                    Some(DataBuffer::Read(_)) if cmd.data_dir_read => {}
-                    Some(DataBuffer::Write(_)) if !cmd.data_dir_read => {}
-                    _ => return Err(SdhciError::InvalidValue),
-                }
+            self.write_reg16(EMMC_XFER_MODE, mode);
+            match data_buffer {
+                Some(DataBuffer::Read(_)) if cmd.data_dir_read => {}
+                Some(DataBuffer::Write(_)) if !cmd.data_dir_read => {}
+                _ => return Err(SdhciError::InvalidValue),
             }
         } else if cmd.resp_type & MMC_RSP_BUSY != 0 {
             // For commands with BUSY but no data, still set timeout control
@@ -340,11 +362,8 @@ impl SdhciHost {
         } else {
             // Error occurred
             trace!(
-                "EMMC Normal Int Status: 0x{:x}",
-                self.read_reg16(EMMC_NORMAL_INT_STAT)
-            );
-            trace!(
-                "EMMC Error Int Status: 0x{:x}",
+                "EMMC Normal Int Status: 0x{:x}, EMMC Error Int Status: 0x{:x}",
+                self.read_reg16(EMMC_NORMAL_INT_STAT), 
                 self.read_reg16(EMMC_ERROR_INT_STAT)
             );
 
@@ -374,9 +393,7 @@ impl SdhciHost {
         if cmd.data_present {
             trace!("Data transfer: cmd.data_present={}", cmd.data_present);
             if let Some(buffer) = &mut data_buffer {
-                #[cfg(feature = "dma")]
-                self.transfer_data_by_dma()?;
-
+                #[cfg(not(feature = "dma"))]
                 match buffer {
                     DataBuffer::Read(buf) => self.read_buffer(buf).unwrap(),
                     DataBuffer::Write(buf) => self.write_buffer(buf).unwrap(),
@@ -441,81 +458,14 @@ impl SdhciHost {
         response
     }
 
-    /// Transfer data using PIO (Programmed I/O) mode
-    /// This function manually reads/writes data to/from the controller buffer
-    /// Parameters:
-    /// - data_dir_read: True for read operation, false for write
-    /// - buffer: Buffer to read data into or write data from
-    pub fn transfer_data_by_pio(
-        &self,
-        data_dir_read: bool,
-        buffer: &mut [u8],
-    ) -> SdhciResult {
-        // Process data in 16-byte chunks (4 words at a time)
-        for i in (0..buffer.len()).step_by(16) {
-            if data_dir_read {
-                // Read operation: controller buffer -> memory
-                let mut values = [0u32; 4];
-                for j in 0..4 {
-                    if i + j * 4 < buffer.len() {
-                        // Read 32-bit word from controller buffer
-                        values[j] = self.read_reg32(EMMC_BUF_DATA);
-
-                        if i + j * 4 + 3 < buffer.len() {
-                            // Unpack 32-bit word into 4 bytes in little-endian order
-                            buffer[i + j * 4] = (values[j] & 0xFF) as u8;
-                            buffer[i + j * 4 + 1] = ((values[j] >> 8) & 0xFF) as u8;
-                            buffer[i + j * 4 + 2] = ((values[j] >> 16) & 0xFF) as u8;
-                            buffer[i + j * 4 + 3] = ((values[j] >> 24) & 0xFF) as u8;
-                        }
-                    }
-                }
-
-                trace!(
-                    "0x{:08x}: 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}",
-                    buffer.as_ptr() as usize + i,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3]
-                );
-            } else {
-                // Write operation: memory -> controller buffer
-                let mut values = [0u32; 4];
-                for j in 0..4 {
-                    if i + j * 4 + 3 < buffer.len() {
-                        // Pack 4 bytes into 32-bit word in little-endian order
-                        values[j] = (buffer[i + j * 4] as u32)
-                            | ((buffer[i + j * 4 + 1] as u32) << 8)
-                            | ((buffer[i + j * 4 + 2] as u32) << 16)
-                            | ((buffer[i + j * 4 + 3] as u32) << 24);
-
-                        // Write 32-bit word to controller buffer
-                        self.write_reg32(EMMC_BUF_DATA, values[j]);
-                    }
-                }
-
-                trace!(
-                    "0x{:08x}: 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}",
-                    buffer.as_ptr() as usize + i,
-                    values[0],
-                    values[1],
-                    values[2],
-                    values[3]
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     /// Write data to SD card buffer register
     /// This is a lower-level function used by data transfer operations
     pub fn write_buffer(&self, buffer: &[u8]) -> SdhciResult {
         // Wait until space is available in the controller buffer
-        self.wait_for_interrupt(EMMC_INT_SPACE_AVAIL, 100000)?;
+        self.wait_for_interrupt(EMMC_INT_SPACE_AVAIL, 100)?;
 
         let len = buffer.len();
+        info!("Writing {} bytes to buffer", len);
         // Write data in 4-byte chunks
         for i in (0..len).step_by(4) {
             // Pack bytes into a 32-bit word, handling potential buffer underrun
@@ -533,12 +483,15 @@ impl SdhciHost {
                 val |= (buffer[i + 3] as u32) << 24;
             }
 
+            // Ensure all memory operations complete before hardware access
+            fence(Ordering::Release);
+
             // Write the 32-bit word to the buffer data register
             self.write_reg32(EMMC_BUF_DATA, val);
         }
 
         // Wait for data transfer to complete
-        self.wait_for_interrupt(EMMC_INT_DATA_END, 1000000)?;
+        self.wait_for_interrupt(EMMC_INT_DATA_END, 100)?;
 
         Ok(())
     }
@@ -547,13 +500,15 @@ impl SdhciHost {
     /// This is a lower-level function used by data transfer operations
     pub fn read_buffer(&self, buffer: &mut [u8]) -> SdhciResult {
         // Wait until data is available in the controller buffer
-        self.wait_for_interrupt(EMMC_INT_DATA_AVAIL, 100000)?;
+        self.wait_for_interrupt(EMMC_INT_DATA_AVAIL, 100)?;
 
         // Read data into buffer in 4-byte chunks
         let len = buffer.len();
+        info!("Reading {} bytes into buffer", len);
         for i in (0..len).step_by(4) {
             // Read 32-bit word from buffer data register
             let val = self.read_reg32(EMMC_BUF_DATA);
+            delay_us(100);
 
             // Unpack the 32-bit word into individual bytes, handling buffer boundary
             buffer[i] = (val & 0xFF) as u8;
@@ -572,7 +527,7 @@ impl SdhciHost {
         }
 
         // Wait for data transfer to complete
-        self.wait_for_interrupt(EMMC_INT_DATA_END, 100000)?;
+        self.wait_for_interrupt(EMMC_INT_DATA_END, 100)?;
 
         Ok(())
     }
@@ -583,15 +538,14 @@ impl SdhciHost {
     /// - flag: The interrupt flag to wait for
     /// - timeout_count: Maximum number of iterations to wait
     fn wait_for_interrupt(&self, flag: u32, timeout_count: u32) -> SdhciResult {
-        let mut timeout = timeout_count;
-        while timeout > 0 {
+        for _ in 0..timeout_count {
             // Read the current interrupt status
             let int_status = self.read_reg32(EMMC_NORMAL_INT_STAT);
 
             // Check if the target flag is set
             if int_status & flag != 0 {
-                // Clear the flag by writing back to the register
-                self.write_reg16(EMMC_NORMAL_INT_STAT, flag as u16);
+                // Clear the flag by writing back to the register (修复：使用32位写入)
+                self.write_reg32(EMMC_NORMAL_INT_STAT, flag);
                 return Ok(());
             }
 
@@ -602,19 +556,19 @@ impl SdhciHost {
                     EMMC_NORMAL_INT_STAT,
                     (int_status & EMMC_INT_ERROR_MASK) as u16,
                 );
-                // Reset the data circuit
-                self.reset_data().unwrap();
+
+                // Reset the data circuit with proper error handling
+                if let Err(e) = self.reset_data() {
+                    warn!("Failed to reset data circuit: {:?}", e);
+                }
+                
                 return Err(SdhciError::DataError);
             }
 
-            timeout -= 1;
+            delay_us(1000); // Wait for 1 ms before checking again
         }
 
-        // If we reached the timeout limit, return timeout error
-        if timeout == 0 {
-            return Err(SdhciError::Timeout);
-        }
-
-        Ok(())
+        // 超时返回错误
+        Err(SdhciError::Timeout)
     }
 }

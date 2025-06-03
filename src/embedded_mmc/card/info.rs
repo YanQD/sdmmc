@@ -12,7 +12,6 @@ pub struct MmcCardExt {
     pub part_support: u8,
     pub part_attr: u8,
     pub wr_rel_set: u8,
-    pub card_caps: u32,
     pub hc_wp_grp_size: u64,
     pub capacity_user: u64,
     pub capacity_boot: u64,
@@ -37,7 +36,6 @@ impl MmcCardExt {
             part_support: 0,
             part_attr: 0,
             wr_rel_set: 0,
-            card_caps: 0,
             hc_wp_grp_size: 0,
             capacity_user: 0,
             capacity_boot: 0,
@@ -58,7 +56,7 @@ impl MmcCardExt {
 
 // SdCardInfo structure for SD cards
 #[derive(Debug, Clone)]
-pub struct SdCardExt {    
+pub struct SdCardExt {
     pub state: u32,
     pub capacity_blocks: u64,
     pub dsr: u32,
@@ -92,6 +90,7 @@ pub struct BaseCardInfo {
     erase_grp_size: u32,
     part_config: u8,
     block_size: u32,
+    card_caps: u32,
 }
 
 impl BaseCardInfo {
@@ -111,6 +110,7 @@ impl BaseCardInfo {
             erase_grp_size: 0,
             part_config: 0,
             block_size: 512, // Default block size
+            card_caps: 0,
         }
     }
 }
@@ -130,7 +130,8 @@ impl_accessors!(
     capacity: u64,
     erase_grp_size: u32,
     part_config: u8,
-    block_size: u32
+    block_size: u32,
+    card_caps: u32
 );
 
 #[derive(Debug, Clone, Default)]
@@ -148,10 +149,10 @@ impl EmmcStatusRegister {
 pub struct SdStatusRegister {
     /// Allocation Unit size in sectors (AU)
     pub au: u32,
-    
+
     /// Erase timeout in milliseconds
     pub erase_timeout: u32,
-    
+
     /// Erase offset in milliseconds  
     pub erase_offset: u32,
 }
@@ -160,11 +161,11 @@ impl SdStatusRegister {
     pub fn au_size_bytes(&self) -> u64 {
         self.au as u64 * 512
     }
-    
+
     pub fn preferred_write_alignment(&self) -> u32 {
         if self.au > 0 { self.au * 512 } else { 4096 }
     }
-    
+
     pub fn actual_erase_time(&self) -> u32 {
         self.erase_timeout + self.erase_offset
     }

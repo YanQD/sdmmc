@@ -703,4 +703,3 @@ pub const MMC_BUS_WIDTH_8BIT: u8 = 8;
 pub const EMMC_PROG_CLOCK_MODE: u16 = 0x0020;
 pub const EMMC_DIVIDER_SHIFT: u16 = 8;
 pub const EMMC_DIVIDER_HI_SHIFT: u16 = 6;
-

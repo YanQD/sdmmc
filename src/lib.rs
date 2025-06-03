@@ -2,8 +2,8 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-mod embedded_mmc;
-
+pub mod embedded_mmc;
+pub mod clock;
 pub mod emmc;
 pub mod err;
 
