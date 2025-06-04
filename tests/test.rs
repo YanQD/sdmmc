@@ -13,13 +13,15 @@ mod tests {
         println,
         time::since_boot,
     };
+    #[cfg(feature = "dma")]
     use dma_api::{DVec, Direction};
     use log::{info, warn};
     use rk3568_clk::{CRU, cru_clksel_con28_bits::*};
-    use sdmmc::{clock::*, embedded_mmc::{host::sdhci::rockship::SdhciHost, MmcHost}, emmc::EMmcHost};
-    use sdmmc::emmc::constant::*;
+    use sdmmc::core::MmcHost;
     use sdmmc::{
         Kernel,
+        clock::{Clk, ClkError, init_global_clk},
+        host::rockship::SdhciHost,
         set_impl,
     };
 
@@ -71,7 +73,6 @@ mod tests {
             .find_compatible(&["rockchip,rk3568-cru"])
             .next()
             .unwrap();
-        // let syscon = fdt.find_compatible(&["rockchip,rk3568-grf"]).next().unwrap();
 
         info!("EMMC: {} Clock: {}", emmc.name, clock.name);
 

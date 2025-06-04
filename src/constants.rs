@@ -1,5 +1,3 @@
-// #![allow(unused)]
-
 // EMMC register offsets
 pub const EMMC_SDMASA: u32 = 0x0000; // SDMA System Address Register
 pub const EMMC_BLOCK_SIZE: u32 = 0x0004; // Block Size Register

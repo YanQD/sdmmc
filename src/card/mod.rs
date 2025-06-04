@@ -1,16 +1,9 @@
 // 卡设备也有不同
-mod info;
+mod device;
 
 extern crate alloc;
-use alloc::boxed::Box;
-use alloc::string::String;
-use alloc::string::ToString;
 use core::fmt::Debug;
-use core::sync::atomic::AtomicBool;
-use info::*;
-
-use super::commands::DataBuffer;
-use super::commands::MmcCommand;
+use device::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CardType {

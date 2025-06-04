@@ -1,8 +1,6 @@
 use crate::impl_accessors;
 
 // 临时的内容，后面需要重新优化改进
-use super::CardType;
-
 // EMmc Card structure
 #[derive(Debug, Clone)]
 pub struct MmcCardExt {

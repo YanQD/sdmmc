@@ -2,10 +2,14 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-pub mod embedded_mmc;
+mod aux;
+pub mod card;
 pub mod clock;
-pub mod emmc;
-pub mod err;
+pub mod commands;
+pub mod constants;
+pub mod core;
+pub mod host;
+pub mod regs;
 
 use log::warn;
 

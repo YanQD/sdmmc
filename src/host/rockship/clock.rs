@@ -1,16 +1,14 @@
 use crate::{
+    aux::dll_lock_wo_tmout,
     clock::emmc_set_clk,
+    commands::MmcCommand,
+    constants::*,
     delay_us,
-    embedded_mmc::{
-        commands::MmcCommand,
-        host::{constants::*, sdhci::SdhciError},
-    },
-    emmc::aux::dll_lock_wo_tmout,
-    err::SdError,
+    host::rockship::{SdhciError, SdhciHost},
 };
 use log::{debug, info};
 
-use super::{SdhciResult, rockship::SdhciHost};
+use super::SdhciResult;
 
 #[derive(Debug, Clone, Copy)]
 pub struct EMmcChipConfig {
@@ -23,7 +21,7 @@ pub struct EMmcChipConfig {
 }
 
 impl EMmcChipConfig {
-    pub fn rk3568_config() -> Self {
+    fn rk3568_config() -> Self {
         Self {
             flags: RK_RXCLK_NO_INVERTER,
             hs200_tx_tap: 16,
@@ -36,8 +34,65 @@ impl EMmcChipConfig {
 }
 
 impl SdhciHost {
+    /// Set the SDHCI EMMC controller's I/O settings
+    pub fn mmc_set_ios(&mut self) {
+        let (card_clock, bus_width, timing) = (self.clock, self.bus_width, self.timing);
+
+        debug!(
+            "card_clock: {}, bus_width: {}, timing: {}",
+            card_clock, bus_width, timing
+        );
+
+        self.dwcmshc_sdhci_emmc_set_clock(card_clock).unwrap();
+
+        /* Set bus width */
+        let mut ctrl = self.read_reg8(EMMC_HOST_CTRL1);
+        if bus_width == 8 {
+            ctrl &= !EMMC_CTRL_4BITBUS;
+            if self.sdhci_get_version() >= EMMC_SPEC_300
+                || (self.quirks & SDHCI_QUIRK_USE_WIDE8) != 0
+            {
+                ctrl |= EMMC_CTRL_8BITBUS;
+            }
+        } else {
+            if self.sdhci_get_version() >= EMMC_SPEC_300
+                || (self.quirks & SDHCI_QUIRK_USE_WIDE8) != 0
+            {
+                ctrl &= !EMMC_CTRL_8BITBUS;
+            }
+            if bus_width == 4 {
+                ctrl |= EMMC_CTRL_4BITBUS;
+            } else {
+                ctrl &= !EMMC_CTRL_4BITBUS;
+            }
+        }
+
+        if !(timing == MMC_TIMING_LEGACY) && (self.quirks & SDHCI_QUIRK_NO_HISPD_BIT) == 0 {
+            ctrl |= EMMC_CTRL_HISPD;
+        } else {
+            ctrl &= !EMMC_CTRL_HISPD;
+        }
+
+        debug!("EMMC Host Control 1: {:#x}", ctrl);
+
+        self.write_reg8(EMMC_HOST_CTRL1, ctrl);
+
+        if timing != MMC_TIMING_LEGACY && timing != MMC_TIMING_MMC_HS && timing != MMC_TIMING_SD_HS
+        {
+            self.sdhci_set_power(MMC_VDD_165_195_SHIFT).unwrap();
+        }
+
+        self.sdhci_set_uhs_signaling();
+    }
+
+    pub fn mmc_card_busy(&self) -> bool {
+        let present_state = self.read_reg32(EMMC_PRESENT_STATE);
+        // Check if DATA[0] line is 0 (low level indicates busy)
+        !(present_state & EMMC_DATA_0_LVL != 0)
+    }
+
     // Rockchip EMMC设置时钟函数
-    pub fn rockchip_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
+    fn rockchip_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
         // wait for command and data inhibit to be cleared
         let mut timeout = 20;
         while (self.read_reg32(EMMC_PRESENT_STATE) & (EMMC_CMD_INHIBIT | EMMC_DATA_INHIBIT)) != 0 {
@@ -56,7 +111,6 @@ impl SdhciHost {
             return Ok(());
         }
 
-        // 计算输入时钟
         let input_clk = emmc_set_clk(freq as u64).unwrap() as u32;
         info!("input_clk: {}", input_clk);
 
@@ -115,7 +169,7 @@ impl SdhciHost {
         Ok(())
     }
 
-    pub fn enable_card_clock(&mut self, mut clk: u16) -> SdhciResult {
+    fn enable_card_clock(&mut self, mut clk: u16) -> SdhciResult {
         clk |= EMMC_CLOCK_INT_EN;
         clk &= !EMMC_CLOCK_INT_STABLE;
         self.write_reg16(EMMC_CLOCK_CONTROL, clk);
@@ -138,11 +192,6 @@ impl SdhciHost {
         );
 
         Ok(())
-    }
-
-    pub fn is_clock_stable(&self) -> bool {
-        let clock_ctrl = self.read_reg16(EMMC_CLOCK_CONTROL);
-        (clock_ctrl & EMMC_CLOCK_INT_STABLE) != 0
     }
 
     pub fn sdhci_set_power(&mut self, power: u32) -> SdhciResult {
@@ -179,8 +228,8 @@ impl SdhciHost {
         Ok(())
     }
 
-    // DWCMSHC SDHCI EMMC设置时钟
-    pub fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
+    /// Sets the clock for the DWCMSHC SDHCI EMMC controller.
+    fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
         let mut timeout = 500;
         let timing = self.timing;
         let data = EMmcChipConfig::rk3568_config();
@@ -306,7 +355,7 @@ impl SdhciHost {
         Ok(())
     }
 
-    pub fn sdhci_set_uhs_signaling(&self) {
+    fn sdhci_set_uhs_signaling(&self) {
         let timing = self.timing;
 
         let mut ctrl_2 = self.read_reg16(EMMC_HOST_CTRL2);
@@ -338,57 +387,7 @@ impl SdhciHost {
         self.write_reg16(EMMC_HOST_CTRL2, ctrl_2);
     }
 
-    pub fn sdhci_set_ios(&mut self) {
-        let (card_clock, bus_width, timing) = (self.clock, self.bus_width, self.timing);
-
-        debug!(
-            "card_clock: {}, bus_width: {}, timing: {}",
-            card_clock, bus_width, timing
-        );
-
-        self.dwcmshc_sdhci_emmc_set_clock(card_clock).unwrap();
-
-        /* Set bus width */
-        let mut ctrl = self.read_reg8(EMMC_HOST_CTRL1);
-        if bus_width == 8 {
-            ctrl &= !EMMC_CTRL_4BITBUS;
-            if self.sdhci_get_version() >= EMMC_SPEC_300
-                || (self.quirks & SDHCI_QUIRK_USE_WIDE8) != 0
-            {
-                ctrl |= EMMC_CTRL_8BITBUS;
-            }
-        } else {
-            if self.sdhci_get_version() >= EMMC_SPEC_300
-                || (self.quirks & SDHCI_QUIRK_USE_WIDE8) != 0
-            {
-                ctrl &= !EMMC_CTRL_8BITBUS;
-            }
-            if bus_width == 4 {
-                ctrl |= EMMC_CTRL_4BITBUS;
-            } else {
-                ctrl &= !EMMC_CTRL_4BITBUS;
-            }
-        }
-
-        if !(timing == MMC_TIMING_LEGACY) && (self.quirks & SDHCI_QUIRK_NO_HISPD_BIT) == 0 {
-            ctrl |= EMMC_CTRL_HISPD;
-        } else {
-            ctrl &= !EMMC_CTRL_HISPD;
-        }
-
-        debug!("EMMC Host Control 1: {:#x}", ctrl);
-
-        self.write_reg8(EMMC_HOST_CTRL1, ctrl);
-
-        if timing != MMC_TIMING_LEGACY && timing != MMC_TIMING_MMC_HS && timing != MMC_TIMING_SD_HS
-        {
-            self.sdhci_set_power(MMC_VDD_165_195_SHIFT).unwrap();
-        }
-
-        self.sdhci_set_uhs_signaling();
-    }
-
-    pub fn sdhci_get_version(&self) -> u16 {
+    fn sdhci_get_version(&self) -> u16 {
         self.read_reg16(EMMC_HOST_CNTRL_VER) & 0xFF
     }
 
@@ -397,13 +396,13 @@ impl SdhciHost {
         timing == MMC_TIMING_MMC_HS400ES
     }
 
-    /// 检查卡是否为HS200模式
+    /// check if the card is in HS200 mode
     pub fn mmc_card_hs200(&self) -> bool {
         let timing = self.timing;
         timing == MMC_TIMING_MMC_HS200
     }
 
-    /// 检查卡是否为HS模式
+    /// check if the card supports high-speed modes
     pub fn mmc_card_hs(&self) -> bool {
         let timing = self.timing;
         (timing == MMC_TIMING_MMC_HS) || (timing == MMC_TIMING_SD_HS)
@@ -469,7 +468,7 @@ impl SdhciHost {
     }
 
     /// Send a single tuning block read command over the SDHCI interface
-    pub fn mmc_send_tuning(&mut self, opcode: u8) -> SdhciResult {
+    fn mmc_send_tuning(&mut self, opcode: u8) -> SdhciResult {
         // Helper to pack DMA boundary and block size fields
         let make_blksz = |dma: u16, blksz: u16| ((dma & 0x7) << 12) | (blksz & 0x0FFF);
 
@@ -549,11 +548,5 @@ impl SdhciHost {
 
         // Exceeded max loops without success: timeout
         Err(SdhciError::Timeout)
-    }
-
-    pub fn mmc_card_busy(&self) -> bool {
-        let present_state = self.read_reg32(EMMC_PRESENT_STATE);
-        // 检查DATA[0]线是否为0（低电平表示忙）
-        !(present_state & EMMC_DATA_0_LVL != 0)
     }
 }
