@@ -4,11 +4,9 @@ use crate::{
     commands::MmcCommand,
     constants::*,
     delay_us,
-    host::rockship::{SdhciError, SdhciHost},
+    host::{rockship::SdhciHost, MmcHostError, MmcHostResult},
 };
 use log::{debug, info};
-
-use super::SdhciResult;
 
 #[derive(Debug, Clone, Copy)]
 pub struct EMmcChipConfig {
@@ -35,7 +33,7 @@ impl EMmcChipConfig {
 
 impl SdhciHost {
     /// Set the SDHCI EMMC controller's I/O settings
-    pub fn mmc_set_ios(&mut self) {
+    pub fn sdhci_set_ios(&mut self) {
         let (card_clock, bus_width, timing) = (self.clock, self.bus_width, self.timing);
 
         debug!(
@@ -92,13 +90,13 @@ impl SdhciHost {
     }
 
     // Rockchip EMMC设置时钟函数
-    fn rockchip_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
+    fn rockchip_emmc_set_clock(&mut self, freq: u32) -> MmcHostResult {
         // wait for command and data inhibit to be cleared
         let mut timeout = 20;
         while (self.read_reg32(EMMC_PRESENT_STATE) & (EMMC_CMD_INHIBIT | EMMC_DATA_INHIBIT)) != 0 {
             if timeout == 0 {
                 debug!("Timeout waiting for cmd & data inhibit");
-                return Err(SdhciError::Timeout);
+                return Err(MmcHostError::Timeout);
             }
             timeout -= 1;
             delay_us(1000);
@@ -169,7 +167,7 @@ impl SdhciHost {
         Ok(())
     }
 
-    fn enable_card_clock(&mut self, mut clk: u16) -> SdhciResult {
+    fn enable_card_clock(&mut self, mut clk: u16) -> MmcHostResult {
         clk |= EMMC_CLOCK_INT_EN;
         clk &= !EMMC_CLOCK_INT_STABLE;
         self.write_reg16(EMMC_CLOCK_CONTROL, clk);
@@ -180,7 +178,7 @@ impl SdhciHost {
             delay_us(1000);
             if timeout == 0 {
                 info!("Internal clock never stabilised.");
-                return Err(SdhciError::Timeout);
+                return Err(MmcHostError::Timeout);
             }
         }
 
@@ -194,7 +192,7 @@ impl SdhciHost {
         Ok(())
     }
 
-    pub fn sdhci_set_power(&mut self, power: u32) -> SdhciResult {
+    pub(crate) fn sdhci_set_power(&mut self, power: u32) -> MmcHostResult {
         let mut pwr: u8 = 0;
 
         if power != 0xFFFF {
@@ -229,7 +227,7 @@ impl SdhciHost {
     }
 
     /// Sets the clock for the DWCMSHC SDHCI EMMC controller.
-    fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32) -> SdhciResult {
+    fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32) -> MmcHostResult {
         let mut timeout = 500;
         let timing = self.timing;
         let data = EMmcChipConfig::rk3568_config();
@@ -261,7 +259,7 @@ impl SdhciHost {
             loop {
                 if timeout <= 0 {
                     info!("Timeout waiting for DLL to be ready");
-                    return Err(SdhciError::Timeout);
+                    return Err(MmcHostError::Timeout);
                 }
 
                 if dll_lock_wo_tmout(self.read_reg32(DWCMSHC_EMMC_DLL_STATUS0)) {
@@ -403,7 +401,7 @@ impl SdhciHost {
     }
 
     /// check if the card supports high-speed modes
-    pub fn mmc_card_hs(&self) -> bool {
+    fn mmc_card_hs(&self) -> bool {
         let timing = self.timing;
         (timing == MMC_TIMING_MMC_HS) || (timing == MMC_TIMING_SD_HS)
     }
@@ -468,7 +466,7 @@ impl SdhciHost {
     }
 
     /// Send a single tuning block read command over the SDHCI interface
-    fn mmc_send_tuning(&mut self, opcode: u8) -> SdhciResult {
+    fn mmc_send_tuning(&mut self, opcode: u8) -> MmcHostResult {
         // Helper to pack DMA boundary and block size fields
         let make_blksz = |dma: u16, blksz: u16| ((dma & 0x7) << 12) | (blksz & 0x0FFF);
 
@@ -496,14 +494,14 @@ impl SdhciHost {
     }
 
     /// Perform HS200 tuning sequence (also used for HS400 initial tuning)
-    pub fn mmc_hs200_tuning(&mut self) -> SdhciResult {
+    pub fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
         let opcode = MMC_SEND_TUNING_BLOCK_HS200;
         let timing = self.timing;
 
         match timing {
             // HS400 tuning must be issued in HS200 mode; reject direct HS400 timing
             MMC_TIMING_MMC_HS400 => {
-                return Err(SdhciError::InvalidValue);
+                return Err(MmcHostError::InvalidValue);
             }
             // HS200 timing: OK to proceed with tuning here
             MMC_TIMING_MMC_HS200 => {
@@ -511,7 +509,7 @@ impl SdhciHost {
             }
             // Any other timing mode is invalid for HS200 tuning
             _ => {
-                return Err(SdhciError::InvalidValue);
+                return Err(MmcHostError::InvalidValue);
             }
         }
 
@@ -525,7 +523,7 @@ impl SdhciHost {
     }
 
     /// Core tuning loop: send tuning blocks until the controller indicates success or timeout
-    fn __emmc_execute_tuning(&mut self, opcode: u8) -> SdhciResult {
+    fn __emmc_execute_tuning(&mut self, opcode: u8) -> MmcHostResult {
         const MAX_TUNING_LOOP: usize = 40;
 
         for _ in 0..MAX_TUNING_LOOP {
@@ -547,6 +545,25 @@ impl SdhciHost {
         }
 
         // Exceeded max loops without success: timeout
-        Err(SdhciError::Timeout)
+        Err(MmcHostError::Timeout)
+    }
+
+    pub fn mmc_set_bus_width(&mut self, width: u8) {
+        /* Set bus width */
+        self.bus_width = width;
+        debug!("Bus width set to {}", width);
+        self.sdhci_set_ios();
+    }
+
+    pub fn mmc_set_timing(&mut self, timing: u32) {
+        /* Set timing */
+        self.timing = timing;
+        self.sdhci_set_ios();
+    }
+
+    pub fn mmc_set_clock(&mut self, clk: u32) {
+        /* Set clock */
+        self.clock = clk;
+        self.sdhci_set_ios();
     }
 }

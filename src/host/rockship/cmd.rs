@@ -1,8 +1,7 @@
 use crate::{
     commands::{DataBuffer, MmcCommand},
     constants::*,
-    delay_us,
-    host::rockship::{SdhciError, SdhciHost, SdhciResult},
+    delay_us, host::{rockship::SdhciHost, MmcHostError, MmcHostResult},
 };
 use log::{info, trace};
 
@@ -16,7 +15,7 @@ impl SdhciHost {
         &self,
         cmd: &MmcCommand,
         mut data_buffer: Option<DataBuffer>,
-    ) -> SdhciResult {
+    ) -> MmcHostResult {
         let mut cmd_timeout = CMD_DEFAULT_TIMEOUT;
 
         // Check if command or data line is busy
@@ -86,7 +85,7 @@ impl SdhciHost {
             match data_buffer {
                 Some(DataBuffer::Read(_)) if cmd.data_dir_read => {}
                 Some(DataBuffer::Write(_)) if !cmd.data_dir_read => {}
-                _ => return Err(SdhciError::InvalidValue),
+                _ => return Err(MmcHostError::InvalidValue),
             }
         } else if cmd.resp_type & MMC_RSP_BUSY != 0 {
             // For commands with BUSY but no data, still set timeout control
@@ -162,7 +161,7 @@ impl SdhciHost {
             // Check for timeout
             if timeout_val == 0 {
                 info!("Timeout for status update!");
-                return Err(SdhciError::Timeout);
+                return Err(MmcHostError::Timeout);
             }
 
             timeout_val -= 1;
@@ -196,9 +195,9 @@ impl SdhciHost {
 
             // Map specific error types
             let err = if err_status & 0x1 != 0 {
-                SdhciError::Timeout
+                MmcHostError::Timeout
             } else {
-                SdhciError::CommandError
+                MmcHostError::CommandError
             };
 
             return Err(err);
@@ -214,7 +213,7 @@ impl SdhciHost {
                     DataBuffer::Write(buf) => self.write_buffer(buf).unwrap(),
                 }
             } else {
-                return Err(SdhciError::InvalidValue);
+                return Err(MmcHostError::InvalidValue);
             }
         }
 

@@ -16,9 +16,9 @@ use crate::card::CardType;
 use crate::card::MmcCard;
 use crate::constants::*;
 use crate::delay_us;
-use crate::host::MmcHostErr;
+use crate::host::MmcHostError;
+use crate::host::MmcHostOps;
 use crate::host::MmcHostResult;
-use crate::host::rockship::SdhciHost;
 
 use super::commands::MmcCommand;
 
@@ -28,15 +28,45 @@ pub struct UDevice {
     pub compatible: Vec<String>,
 }
 
-pub struct MmcHost {
-    pub name: String,
-    pub card: Option<MmcCard>,
-    pub host_ops: SdhciHost,
+pub struct MmcHostInfo {
+    pub clock_base: u32,
+    pub voltages: u32,
+    pub quirks: u32,
+    pub host_caps: u32,
+    pub version: u16,
+
+    pub timing: u32,
+    pub bus_width: u8,
+    pub clock: u32,
 }
 
-impl MmcHost {
-    pub fn new(name: String, host_ops: SdhciHost) -> Self {
+impl MmcHostInfo {
+    pub fn new() -> Self {
+        MmcHostInfo {
+            clock_base: 0,
+            voltages: 0,
+            quirks: 0,
+            host_caps: 0,
+            version: 0,
+
+            timing: MMC_TIMING_LEGACY,
+            bus_width: 1, // Default to 1-bit bus width
+            clock: 400000, // Default to 400 kHz
+        }
+    }
+}
+
+pub struct MmcHost<T: MmcHostOps>{
+    pub name: String,
+    pub card: Option<MmcCard>,
+    pub host_info: MmcHostInfo,
+    pub host_ops: T,
+}
+
+impl<T: MmcHostOps> MmcHost<T> {
+    pub fn new(name: String, host_ops: T) -> Self {
         MmcHost {
+            host_info: MmcHostInfo::new(),
             name,
             card: None,
             host_ops,
@@ -70,11 +100,11 @@ impl MmcHost {
         self.card.as_mut()
     }
 
-    fn host_ops(&self) -> &SdhciHost {
+    fn host_ops(&self) -> &T {
         &self.host_ops
     }
 
-    fn host_ops_mut(&mut self) -> &mut SdhciHost {
+    fn host_ops_mut(&mut self) -> &mut T {
         &mut self.host_ops
     }
 
@@ -93,12 +123,12 @@ impl MmcHost {
         while busy {
             if send_status {
                 let cmd = MmcCommand::new(MMC_SEND_STATUS, rca << 16, MMC_RSP_R1);
-                self.host_ops().send_command(&cmd, None).unwrap();
+                self.host_ops().mmc_send_command(&cmd, None).unwrap();
                 let response = self.get_response().as_r1();
                 trace!("cmd_d {:#x}", response);
 
                 if response & MMC_STATUS_SWITCH_ERROR != 0 {
-                    return Err(MmcHostErr::CommandError);
+                    return Err(MmcHostError::CommandError);
                 }
                 busy = (response & MMC_STATUS_CURR_STATE) == MMC_STATE_PRG;
                 if !busy {
@@ -109,7 +139,7 @@ impl MmcHost {
             }
 
             if timeout == 0 && busy {
-                return Err(MmcHostErr::Timeout);
+                return Err(MmcHostError::Timeout);
             }
 
             timeout -= 1;
@@ -141,7 +171,7 @@ impl MmcHost {
 
         // CMD7: Select the card
         let cmd = MmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
 
         debug!("cmd7: {:#x}", self.get_response().as_r1());
 
@@ -396,7 +426,7 @@ impl MmcHost {
             if has_parts {
                 let err = self.mmc_switch(EXT_CSD_CMD_SET_NORMAL, EXT_CSD_ERASE_GROUP_DEF, 1, true);
                 if err.is_err() {
-                    return Err(MmcHostErr::CommandError);
+                    return Err(MmcHostError::CommandError);
                 } else {
                     ext_csd[EXT_CSD_ERASE_GROUP_DEF as usize] = 1;
                 }
@@ -489,7 +519,7 @@ impl MmcHost {
                     .base_info_mut()
                     .set_capacity(capacity_gp[(part_num - 4) as usize]);
             }
-            _ => return Err(MmcHostErr::InvalidValue),
+            _ => return Err(MmcHostError::InvalidValue),
         }
 
         let capacity = card_mut.base_info().capacity();
@@ -541,7 +571,7 @@ impl MmcHost {
             // Standard high-speed mode
             self.mmc_select_hs()
         } else {
-            Err(MmcHostErr::InvalidValue)
+            Err(MmcHostError::InvalidValue)
         };
 
         // Apply the result of speed mode selection
@@ -555,20 +585,20 @@ impl MmcHost {
             let tuning_result = self.host_ops_mut().mmc_hs200_tuning();
 
             // Optionally upgrade to HS400 mode if supported and using 8-bit bus
-            let bus_width = self.host_ops().bus_width;
+            let bus_width = self.host_ops().bus_width();
             if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0 && bus_width == MMC_BUS_WIDTH_8BIT {
                 // self.mmc_select_hs400()?; // Currently not executed
                 self.host_ops_mut().mmc_set_bus_speed(avail_type as u32);
             }
 
-            tuning_result.map_err(|_| MmcHostErr::CommandError)
+            tuning_result.map_err(|_| MmcHostError::CommandError)
         } else if !self.host_ops().mmc_card_hs400es() {
             // If not in HS400 Enhanced Stroxbe mode, try to switch bus width
             let width_result = self.mmc_select_bus_width()?;
             let err = if width_result > 0 {
                 Ok(())
             } else {
-                Err(MmcHostErr::CommandError)
+                Err(MmcHostError::CommandError)
             };
 
             // If DDR52 mode is supported, implement selection (currently TODO)
@@ -616,7 +646,7 @@ impl MmcHost {
         }
 
         // Check if host supports 4-bit or 8-bit bus width
-        let host_caps = self.host_ops().host_caps;
+        let host_caps = self.host_ops().host_caps();
         let version = self.card().unwrap().base_info().card_version();
         if version < MMC_VERSION_4 || (host_caps & (MMC_MODE_4BIT | MMC_MODE_8BIT)) == 0 {
             return Ok(0);
@@ -668,7 +698,7 @@ impl MmcHost {
             }
         }
 
-        Err(MmcHostErr::CommandError)
+        Err(MmcHostError::CommandError)
     }
 
     fn compare_sector_count(&self, ext_csd: &[u8], test_csd: &[u8]) -> bool {

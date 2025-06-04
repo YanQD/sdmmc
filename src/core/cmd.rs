@@ -4,15 +4,15 @@ use crate::{
     constants::*,
     core::MmcHost,
     delay_us,
-    host::{MmcHostErr, MmcHostResult},
+    host::{MmcHostError, MmcHostOps, MmcHostResult},
 };
 use log::{debug, info};
 
-impl MmcHost {
+impl<T: MmcHostOps> MmcHost<T> {
     // Send CMD0 to reset the card
     pub fn mmc_go_idle(&self) -> MmcHostResult {
         let cmd = MmcCommand::new(MMC_GO_IDLE_STATE, 0, MMC_RSP_NONE);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
 
         delay_us(100);
 
@@ -25,7 +25,7 @@ impl MmcHost {
         // First command to get capabilities
 
         let mut cmd = MmcCommand::new(MMC_SEND_OP_COND, ocr, MMC_RSP_R3);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
         delay_us(1000);
 
         // Get response and store it
@@ -40,7 +40,7 @@ impl MmcHost {
         let ocr_access_mode = 0x60000000;
 
         let cmd_arg = ocr_hcs
-            | (self.host_ops().voltages & (card_ocr & ocr_voltage_mask))
+            | (self.host_ops().voltages() & (card_ocr & ocr_voltage_mask))
             | (card_ocr & ocr_access_mode);
 
         // info!("eMMC CMD1 arg for retries: {:#x}", cmd_arg);
@@ -49,7 +49,7 @@ impl MmcHost {
         let mut ready = false;
         while retry > 0 && !ready {
             cmd = MmcCommand::new(MMC_SEND_OP_COND, cmd_arg, MMC_RSP_R3);
-            self.host_ops().send_command(&cmd, None).unwrap();
+            self.host_ops().mmc_send_command(&cmd, None).unwrap();
             let resp = self.get_response().as_r3();
             card_ocr = resp;
 
@@ -86,7 +86,7 @@ impl MmcHost {
         info!("eMMC initialization status: {}", ready);
 
         if !ready {
-            return Err(MmcHostErr::Unsupported);
+            return Err(MmcHostError::UnsupportedOperation);
         }
 
         delay_us(1000);
@@ -108,7 +108,7 @@ impl MmcHost {
     // Send CMD2 to get CID
     pub fn mmc_all_send_cid(&mut self) -> MmcHostResult<[u32; 4]> {
         let cmd = MmcCommand::new(MMC_ALL_SEND_CID, 0, MMC_RSP_R2);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
         let response = self.get_response();
 
         // Now borrow card as mutable to update it
@@ -126,7 +126,7 @@ impl MmcHost {
         let rca = card.base_info().rca();
 
         let cmd = MmcCommand::new(MMC_SET_RELATIVE_ADDR, rca << 16, MMC_RSP_R1);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
 
         Ok(())
     }
@@ -135,7 +135,7 @@ impl MmcHost {
     pub fn mmc_set_dsr(&mut self, dsr: u32) -> MmcHostResult {
         // Set DSR (Driver Stage Register) value
         let cmd = MmcCommand::new(MMC_SET_DSR, dsr, MMC_RSP_NONE);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
         Ok(())
     }
 
@@ -149,7 +149,7 @@ impl MmcHost {
         );
 
         loop {
-            let ret = self.host_ops().send_command(&cmd, None);
+            let ret = self.host_ops().mmc_send_command(&cmd, None);
 
             if ret.is_ok() {
                 debug!("cmd6 {:#x}", self.get_response().as_r1());
@@ -163,7 +163,7 @@ impl MmcHost {
             }
         }
 
-        Err(MmcHostErr::Timeout)
+        Err(MmcHostError::Timeout)
     }
 
     // Send CMD8 to get EXT_CSD
@@ -175,7 +175,7 @@ impl MmcHost {
         );
 
         self.host_ops()
-            .send_command(&cmd, Some(DataBuffer::Read(ext_csd)))
+            .mmc_send_command(&cmd, Some(DataBuffer::Read(ext_csd)))
             .unwrap();
 
         // debug!("CMD8: {:#x}",self.get_response().as_r1());
@@ -191,7 +191,7 @@ impl MmcHost {
         let rca = card.base_info().rca();
 
         let cmd = MmcCommand::new(MMC_SEND_CSD, rca << 16, MMC_RSP_R2);
-        self.host_ops().send_command(&cmd, None).unwrap();
+        self.host_ops().mmc_send_command(&cmd, None).unwrap();
         let response = self.get_response();
 
         // Now borrow card as mutable to update it

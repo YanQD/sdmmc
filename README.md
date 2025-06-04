@@ -37,3 +37,8 @@ dtb_file = "./firmware/rk3568-firefly-roc-pc-se.dtb"
 make uboot
 ```
 系统会自动使用上述配置通过串口进行测试。确保设备已连接且权限允许访问 `/dev/ttyUSB1`。
+
+## 需补充内容
+
++ Common mod
++ 兼容层相关内容，是否需要每个host都一个？

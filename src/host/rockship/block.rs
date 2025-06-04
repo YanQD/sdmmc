@@ -1,7 +1,7 @@
 use crate::{
     constants::*,
     delay_us,
-    host::rockship::{SdhciError, SdhciHost, SdhciResult},
+    host::{rockship::SdhciHost, MmcHostError, MmcHostResult},
 };
 use core::sync::atomic::{Ordering, fence};
 use log::{info, warn};
@@ -9,7 +9,7 @@ use log::{info, warn};
 impl SdhciHost {
     /// Write data to SD card buffer register
     /// This is a lower-level function used by data transfer operations
-    pub fn write_buffer(&self, buffer: &[u8]) -> SdhciResult {
+    pub fn write_buffer(&self, buffer: &[u8]) -> MmcHostResult {
         // Wait until space is available in the controller buffer
         self.wait_for_interrupt(EMMC_INT_SPACE_AVAIL, 100)?;
 
@@ -47,7 +47,7 @@ impl SdhciHost {
 
     /// Read data from SD card buffer register
     /// This is a lower-level function used by data transfer operations
-    pub fn read_buffer(&self, buffer: &mut [u8]) -> SdhciResult {
+    pub fn read_buffer(&self, buffer: &mut [u8]) -> MmcHostResult {
         // Wait until data is available in the controller buffer
         self.wait_for_interrupt(EMMC_INT_DATA_AVAIL, 100)?;
 
@@ -86,7 +86,7 @@ impl SdhciHost {
     /// Parameters:
     /// - flag: The interrupt flag to wait for
     /// - timeout_count: Maximum number of iterations to wait
-    fn wait_for_interrupt(&self, flag: u32, timeout_count: u32) -> SdhciResult {
+    fn wait_for_interrupt(&self, flag: u32, timeout_count: u32) -> MmcHostResult {
         for _ in 0..timeout_count {
             // Read the current interrupt status
             let int_status = self.read_reg32(EMMC_NORMAL_INT_STAT);
@@ -111,13 +111,13 @@ impl SdhciHost {
                     warn!("Failed to reset data circuit: {:?}", e);
                 }
 
-                return Err(SdhciError::DataError);
+                return Err(MmcHostError::DataError);
             }
 
             delay_us(1000); // Wait for 1 ms before checking again
         }
 
         // Timeout, return error
-        Err(SdhciError::Timeout)
+        Err(MmcHostError::Timeout)
     }
 }

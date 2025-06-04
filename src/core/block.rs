@@ -1,11 +1,13 @@
 use crate::commands::{DataBuffer, MmcCommand};
 use crate::core::MmcHost;
+use crate::host::MmcHostOps;
 #[cfg(feature = "pio")]
 use crate::host::MmcHostResult;
-use crate::{card::CardType, constants::*, host::MmcHostErr};
+use crate::{card::CardType, constants::*};
 use log::{info, trace};
+use crate::host::MmcHostError;
 
-impl MmcHost {
+impl<T: MmcHostOps> MmcHost<T> {
     /// Read blocks from SD card using PIO (Programmed I/O) mode
     /// Parameters:
     /// - block_id: Starting block address to read from
@@ -13,6 +15,7 @@ impl MmcHost {
     /// - buffer: Buffer to store the read data
     #[cfg(feature = "pio")]
     pub fn read_blocks(&self, block_id: u32, blocks: u16, buffer: &mut [u8]) -> MmcHostResult {
+
         trace!(
             "pio read_blocks: block_id = {}, blocks = {}",
             block_id, blocks
@@ -21,7 +24,7 @@ impl MmcHost {
         // Check if card is initialized
         match &self.card {
             Some(card) => card,
-            None => return Err(MmcHostErr::NotReady),
+            None => return Err(MmcHostError::DeviceNotFound),
         };
 
         let card = self.card().unwrap();
@@ -30,7 +33,7 @@ impl MmcHost {
         } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
             card.cardext().unwrap().as_sd().unwrap().state
         } else {
-            return Err(MmcHostErr::InvalidValue);
+            return Err(MmcHostError::InvalidValue);
         };
 
         // Adjust block address based on card type
@@ -51,7 +54,7 @@ impl MmcHost {
             let cmd = MmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
                 .with_data(512, 1, true);
             self.host_ops()
-                .send_command(&cmd, Some(DataBuffer::Read(buffer)))
+                .mmc_send_command(&cmd, Some(DataBuffer::Read(buffer)))
                 .unwrap();
         } else {
             // Multiple block read operation
@@ -64,12 +67,12 @@ impl MmcHost {
             );
 
             self.host_ops()
-                .send_command(&cmd, Some(DataBuffer::Read(buffer)))
+                .mmc_send_command(&cmd, Some(DataBuffer::Read(buffer)))
                 .unwrap();
 
             // Must send stop transmission command after multiple block read
             let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.host_ops().send_command(&stop_cmd, None).unwrap();
+            self.host_ops().mmc_send_command(&stop_cmd, None).unwrap();
         }
 
         Ok(())
@@ -82,8 +85,6 @@ impl MmcHost {
     /// - buffer: Buffer containing data to write
     #[cfg(feature = "pio")]
     pub fn write_blocks(&self, block_id: u32, blocks: u16, buffer: &[u8]) -> MmcHostResult {
-        use log::trace;
-
         trace!(
             "pio write_blocks: block_id = {}, blocks = {}",
             block_id, blocks
@@ -92,12 +93,12 @@ impl MmcHost {
         // Check if card is initialized
         match &self.card {
             Some(card) => card,
-            None => return Err(MmcHostErr::NotReady),
+            None => return Err(MmcHostError::DeviceNotFound),
         };
 
         // Check if card is write protected
         if self.is_write_protected() {
-            return Err(MmcHostErr::NotReady);
+            return Err(MmcHostError::CommandError);
         }
 
         let card = self.card().unwrap();
@@ -106,7 +107,7 @@ impl MmcHost {
         } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
             card.cardext().unwrap().as_sd().unwrap().state
         } else {
-            return Err(MmcHostErr::InvalidValue);
+            return Err(MmcHostError::InvalidValue);
         };
 
         // Determine the correct address based on card capacity type
@@ -127,7 +128,7 @@ impl MmcHost {
             let cmd =
                 MmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false);
             self.host_ops()
-                .send_command(&cmd, Some(DataBuffer::Write(buffer)))
+                .mmc_send_command(&cmd, Some(DataBuffer::Write(buffer)))
                 .unwrap();
         } else {
             // Multiple block write operation
@@ -135,12 +136,12 @@ impl MmcHost {
                 .with_data(512, blocks, false);
 
             self.host_ops()
-                .send_command(&cmd, Some(DataBuffer::Write(buffer)))
+                .mmc_send_command(&cmd, Some(DataBuffer::Write(buffer)))
                 .unwrap();
 
             // Must send stop transmission command after multiple block write
             let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.host_ops().send_command(&stop_cmd, None).unwrap();
+            self.host_ops().mmc_send_command(&stop_cmd, None).unwrap();
         }
 
         Ok(())

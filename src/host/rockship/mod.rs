@@ -2,60 +2,15 @@ mod block;
 pub mod clock;
 pub mod cmd;
 
-use crate::{aux::generic_fls, constants::*, delay_us, impl_register_ops};
 use core::fmt::Display;
-use log::{debug, info};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum SdhciError {
-    RegisterAccessFailed,
-    ClockSetupFailed,
-    CardDetectFailed,
-    StrobeConfigurationFailed,
-    InvalidRegister,
-    InvalidValue,
-    HardwareError,
-    GpioError,
-    UnsupportedOperation,
-    DeviceNotFound,
-    ProbeFailure,
-    PhyInitFailed,
-    UnsupportedCard,
-    CommandError,
-    DataError,
-    Timeout,
-}
-
-impl Display for SdhciError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            SdhciError::RegisterAccessFailed => write!(f, "Register access failed"),
-            SdhciError::ClockSetupFailed => write!(f, "Clock setup failed"),
-            SdhciError::CardDetectFailed => write!(f, "Card detection failed"),
-            SdhciError::StrobeConfigurationFailed => write!(f, "Strobe configuration failed"),
-            SdhciError::InvalidRegister => write!(f, "Invalid register"),
-            SdhciError::InvalidValue => write!(f, "Invalid value"),
-            SdhciError::HardwareError => write!(f, "Hardware error"),
-            SdhciError::GpioError => write!(f, "GPIO error"),
-            SdhciError::UnsupportedOperation => write!(f, "Unsupported operation"),
-            SdhciError::DeviceNotFound => write!(f, "Device not found"),
-            SdhciError::ProbeFailure => write!(f, "Probe failure"),
-            SdhciError::PhyInitFailed => write!(f, "PHY initialization failed"),
-            SdhciError::UnsupportedCard => write!(f, "Unsupported card type"),
-            SdhciError::CommandError => write!(f, "Command execution error"),
-            SdhciError::DataError => write!(f, "Data transfer error"),
-            SdhciError::Timeout => write!(f, "Operation timed out"),
-        }
-    }
-}
-
-pub type SdhciResult<T = ()> = Result<T, SdhciError>;
+use crate::{aux::generic_fls, constants::*, delay_us, host::{MmcHostError, MmcHostOps, MmcHostResult}, impl_register_ops};
+use log::info;
 
 // SD Host Controller structure
 #[derive(Debug)]
 pub struct SdhciHost {
     pub base_addr: usize,
-    pub caps: u32,
     pub clock_base: u32,
     pub voltages: u32,
     pub quirks: u32,
@@ -71,8 +26,16 @@ impl Display for SdhciHost {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "EMMC Controller {{ base_addr: {:#x}, caps: {:#x}, clock_base: {} }}",
-            self.base_addr, self.caps, self.clock_base
+            "SdhciHost(base_addr: {:#x}, clock_base: {}, voltages: {:#x}, quirks: {:#x}, host_caps: {:#x}, version: 0x{:x}, timing: {}, bus_width: {}, clock: {})",
+            self.base_addr,
+            self.clock_base,
+            self.voltages,
+            self.quirks,
+            self.host_caps,
+            self.version,
+            self.timing,
+            self.bus_width,
+            self.clock
         )
     }
 }
@@ -83,7 +46,6 @@ impl SdhciHost {
     pub fn new(base_addr: usize) -> Self {
         SdhciHost {
             base_addr,
-            caps: 0,
             clock_base: 0,
             voltages: 0,
             quirks: 0,
@@ -97,7 +59,7 @@ impl SdhciHost {
     }
 
     // Initialize the host controller
-    pub fn init_host(&mut self) -> SdhciResult {
+    fn init_host(&mut self) -> MmcHostResult {
         info!("Init EMMC Controller");
 
         // Reset the controller
@@ -134,7 +96,7 @@ impl SdhciHost {
 
         if self.clock_base == 0 {
             info!("Hardware doesn't specify base clock frequency");
-            return Err(SdhciError::UnsupportedCard);
+            return Err(MmcHostError::UnsupportedCard);
         }
 
         self.host_caps = MMC_MODE_HS | MMC_MODE_HS_52MHZ | MMC_MODE_4BIT;
@@ -146,8 +108,6 @@ impl SdhciHost {
         // 暂时写死
         self.host_caps |= 0x48;
 
-        // debug!("self.host_caps {:#x}", self.host_caps);
-
         let mut voltages = 0;
 
         if (caps1 & EMMC_CAN_VDD_330) != 0 {
@@ -158,7 +118,7 @@ impl SdhciHost {
             voltages |= MMC_VDD_165_195;
         } else {
             info!("Unsupported voltage range");
-            return Err(SdhciError::UnsupportedCard);
+            return Err(MmcHostError::UnsupportedCard);
         }
 
         self.voltages = voltages;
@@ -193,7 +153,7 @@ impl SdhciHost {
 
     // Reset the controller
     #[inline]
-    pub fn reset(&self, reset_flag: u8) -> SdhciResult {
+    pub fn reset(&self, reset_flag: u8) -> MmcHostResult {
         // Request reset
         self.write_reg8(EMMC_SOFTWARE_RESET, reset_flag);
 
@@ -201,7 +161,7 @@ impl SdhciHost {
         let mut timeout = 20; // Increased timeout
         while (self.read_reg8(EMMC_SOFTWARE_RESET) & reset_flag) != 0 {
             if timeout == 0 {
-                return Err(SdhciError::Timeout);
+                return Err(MmcHostError::Timeout);
             }
             timeout -= 1;
             delay_us(1000);
@@ -210,22 +170,91 @@ impl SdhciHost {
         Ok(())
     }
 
-    pub fn mmc_set_bus_width(&mut self, width: u8) {
-        /* Set bus width */
-        self.bus_width = width;
-        debug!("Bus width set to {}", width);
-        self.mmc_set_ios();
+
+}
+
+impl MmcHostOps for SdhciHost {
+    fn init_host(&mut self) -> MmcHostResult {
+        self.init_host()
     }
 
-    pub fn mmc_set_timing(&mut self, timing: u32) {
-        /* Set timing */
-        self.timing = timing;
-        self.mmc_set_ios();
+    fn read_reg8(&self, offset: u32) -> u8 {
+        self.read_reg8(offset)
     }
 
-    pub fn mmc_set_clock(&mut self, clk: u32) {
-        /* Set clock */
-        self.clock = clk;
-        self.mmc_set_ios();
+    fn write_reg8(&self, offset: u32, value: u8) {
+        self.write_reg8(offset, value)
+    }
+
+    fn read_reg16(&self, offset: u32) -> u16 {
+        self.read_reg16(offset)
+    }
+
+    fn write_reg16(&self, offset: u32, value: u16) {
+        self.write_reg16(offset, value)
+    }
+
+    fn read_reg32(&self, offset: u32) -> u32 {
+        self.read_reg32(offset)
+    }
+
+    fn write_reg32(&self, offset: u32, value: u32) {
+        self.write_reg32(offset, value)
+    }
+
+    fn mmc_send_command(&self, cmd: &crate::commands::MmcCommand, data_buffer: Option<crate::commands::DataBuffer>) -> MmcHostResult {
+        self.send_command(cmd, data_buffer)
+    }
+
+    fn mmc_card_busy(&self) -> bool {
+        self.mmc_card_busy()
+    }
+
+    fn mmc_set_ios(&mut self) {
+        self.sdhci_set_ios();
+    }
+
+    fn mmc_card_hs400es(&self) -> bool {
+        self.mmc_card_hs400es()
+    }
+
+    fn mmc_card_hs200(&self) -> bool {
+        self.mmc_card_hs200()
+    }
+
+    fn mmc_set_bus_speed(&mut self, avail_type: u32) {
+        self.mmc_set_bus_speed(avail_type);
+    }
+
+    fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
+        self.mmc_select_card_type(ext_csd)
+    }
+
+    fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
+        self.mmc_hs200_tuning()
+    }
+
+    fn mmc_set_bus_width(&mut self, width: u8) {
+        self.mmc_set_bus_width(width);
+    }
+
+    fn mmc_set_timing(&mut self, timing: u32) {
+        self.mmc_set_timing(timing);
+    }
+    
+    fn mmc_set_clock(&mut self, clk: u32) {
+        self.mmc_set_clock(clk);
+    }
+
+    fn voltages(&self) -> u32 {
+        self.voltages
+    }
+
+    fn host_caps(&self) -> u32 {
+        self.host_caps
+    }
+
+    fn bus_width(&self) -> u8 {
+        self.bus_width
     }
 }
