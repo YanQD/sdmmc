@@ -5,8 +5,8 @@
 mod aux;
 mod card;
 mod common;
-mod constants;
 
+pub mod constants;
 pub mod core;
 pub mod host;
 

@@ -14,7 +14,11 @@ mod tests {
         time::since_boot,
     };
     #[cfg(feature = "dma")]
-    use dma_api::{DVec, Direction};
+    use {
+        dma_api::{DVec, Direction},
+        sdmmc::constants::MMC_MAX_BLOCK_LEN,
+    };
+
     use log::{info, warn};
     use rk3568_clk::{CRU, cru_clksel_con28_bits::*};
     use sdmmc::core::MmcHost;

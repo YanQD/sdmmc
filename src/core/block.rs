@@ -1,5 +1,9 @@
-#[cfg(feature = "pio")]
+#[cfg(feature = "dma")]
+use dma_api::DVec;
+
 use crate::host::MmcHostResult;
+
+
 use crate::{
     card::CardType,
     common::commands::{DataBuffer, MmcCommand},
@@ -7,7 +11,8 @@ use crate::{
     core::MmcHost,
     host::{MmcHostError, MmcHostOps},
 };
-use log::{info, trace};
+
+use log::trace;
 
 impl<T: MmcHostOps> MmcHost<T> {
     /// Read blocks from SD card using PIO (Programmed I/O) mode
@@ -62,7 +67,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             let cmd = MmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
                 .with_data(512, blocks, true);
 
-            info!(
+            trace!(
                 "Sending multiple block read command: {:?}, blocks: {}",
                 cmd, blocks
             );
@@ -96,6 +101,11 @@ impl<T: MmcHostOps> MmcHost<T> {
             Some(card) => card,
             None => return Err(MmcHostError::DeviceNotFound),
         };
+
+        // Check if card is properly initialized
+        if !card.is_initialized() {
+            return Err(MmcHostError::UnsupportedCard);
+        }
 
         // Check if card is write protected
         if self.is_write_protected() {
@@ -143,6 +153,148 @@ impl<T: MmcHostOps> MmcHost<T> {
             // Must send stop transmission command after multiple block write
             let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
             self.host_ops().mmc_send_command(&stop_cmd, None).unwrap();
+        }
+
+        Ok(())
+    }
+
+    /// Read one or more data blocks from the card
+    #[cfg(feature = "dma")]
+    pub fn read_blocks(
+        &self,
+        block_id: u32,
+        blocks: u16,
+        buffer: &mut DVec<u8>,
+    ) -> MmcHostResult {
+        // Check if buffer size matches the expected size based on number of blocks
+        let expected_size = blocks as usize * 512;
+        if buffer.len() != expected_size {
+            return Err(MmcHostError::IoError);
+        }
+
+        // Check if card is initialized and extract card information
+        let card = match &self.card {
+            Some(card) => card,
+            None => return Err(MmcHostError::DeviceNotFound),
+        };
+
+        // Adjust block address based on card type
+        // High capacity cards use block addressing, standard capacity cards use byte addressing
+        let card_state = if card.card_type() == CardType::Mmc {
+            card.cardext().unwrap().as_mmc().unwrap().state
+        } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
+            card.cardext().unwrap().as_sd().unwrap().state
+        } else {
+            return Err(MmcHostError::InvalidValue);
+        };
+
+        // Determine the correct address based on card capacity type
+        let card_addr = if card_state & MMC_STATE_HIGHCAPACITY != 0 {
+            block_id // High capacity card: use block address directly
+        } else {
+            block_id * 512 // Standard capacity card: convert to byte address
+        };
+
+        trace!(
+            "Reading {} blocks starting at address: {:#x}",
+            blocks, card_addr
+        );
+
+        // Select appropriate command based on number of blocks
+        if blocks == 1 {
+            // Single block read operation
+            let cmd = MmcCommand::new(MMC_READ_SINGLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, 1, true); // Configure for reading 512 bytes with DMA
+            self.host_ops()
+                .mmc_send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
+        } else {
+            // Multiple block read operation
+            let cmd = MmcCommand::new(MMC_READ_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, blocks, true); // Configure for reading multiple blocks with DMA
+
+            self.host_ops()
+                .mmc_send_command(&cmd, Some(DataBuffer::Read(buffer)))?;
+
+            // Must send stop transmission command after multiple block read
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.host_ops()
+                .mmc_send_command(&stop_cmd, None)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write multiple blocks to the card
+    #[cfg(feature = "dma")]
+    pub fn write_blocks(
+        &self,
+        block_id: u32,
+        blocks: u16,
+        buffer: &DVec<u8>,
+    ) -> MmcHostResult {
+        // Verify that buffer size matches the requested number of blocks
+        let expected_size = blocks as usize * 512;
+        if buffer.len() != expected_size {
+            return Err(MmcHostError::IoError);
+        }
+
+        // Extract card information and check if card exists
+        let card = match &self.card {
+            Some(card) => card,
+            None => return Err(MmcHostError::DeviceNotFound),
+        };
+
+        // Check if card is properly initialized
+        if !card.is_initialized() {
+            return Err(MmcHostError::UnsupportedCard);
+        }
+
+        // Check if card is write protected
+        if self.is_write_protected() {
+            return Err(MmcHostError::CommandError);
+        }
+
+        // Determine the correct address based on card capacity type
+        let card = self.card().unwrap();
+        let card_state = if card.card_type() == CardType::Mmc {
+            card.cardext().unwrap().as_mmc().unwrap().state
+        } else if card.card_type() == CardType::SdV1 || card.card_type() == CardType::SdV2 {
+            card.cardext().unwrap().as_sd().unwrap().state
+        } else {
+            return Err(MmcHostError::InvalidValue);
+        };
+
+        // Determine the correct address based on card capacity type
+        let card_addr = if card_state & MMC_STATE_HIGHCAPACITY != 0 {
+            block_id // High capacity card: use block address directly
+        } else {
+            block_id * 512 // Standard capacity card: convert to byte address
+        };
+
+        trace!(
+            "Writing {} blocks starting at address: {:#x}",
+            blocks, card_addr
+        );
+
+        // Select appropriate command based on number of blocks
+        if blocks == 1 {
+            // Single block write operation
+            let cmd =
+                MmcCommand::new(MMC_WRITE_BLOCK, card_addr, MMC_RSP_R1).with_data(512, 1, false); // Configure for writing 512 bytes with DMA (false = write)
+            self.host_ops()
+                .mmc_send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
+        } else {
+            // Multiple block write operation
+            let cmd = MmcCommand::new(MMC_WRITE_MULTIPLE_BLOCK, card_addr, MMC_RSP_R1)
+                .with_data(512, blocks, false); // Configure for writing multiple blocks
+
+            self.host_ops()
+                .mmc_send_command(&cmd, Some(DataBuffer::Write(buffer)))?;
+
+            // Must send stop transmission command after multiple block write
+            let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
+            self.host_ops()
+                .mmc_send_command(&stop_cmd, None)?;
         }
 
         Ok(())

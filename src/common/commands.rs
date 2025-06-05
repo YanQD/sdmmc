@@ -1,8 +1,18 @@
 use log::info;
 
+#[cfg(feature = "dma")]
+use dma_api::DVec;
+
+#[cfg(feature = "pio")]
 pub enum DataBuffer<'a> {
     Read(&'a mut [u8]),
     Write(&'a [u8]),
+}
+
+#[cfg(feature = "dma")]
+pub enum DataBuffer<'a> {
+    Read(&'a mut DVec<u8>),
+    Write(&'a DVec<u8>),
 }
 
 #[derive(Debug)]

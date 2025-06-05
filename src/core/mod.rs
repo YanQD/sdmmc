@@ -7,6 +7,8 @@ mod mmc;
 
 extern crate alloc;
 use alloc::string::String;
+#[cfg(feature = "dma")]
+use dma_api::{DVec, Direction};
 use log::debug;
 use log::info;
 use log::trace;
@@ -131,7 +133,7 @@ impl<T: MmcHostOps> MmcHost<T> {
     // Check if card is present
     fn is_card_present(&self) -> bool {
         let state = self.host_ops().read_reg32(EMMC_PRESENT_STATE);
-        // debug!("EMMC Present State: {:#b}", state);
+        trace!("EMMC Present State: {:#b}", state);
         (state & EMMC_CARD_INSERTED) != 0 && ((state & EMMC_CARD_STABLE) != 0)
     }
 
@@ -178,7 +180,7 @@ impl<T: MmcHostOps> MmcHost<T> {
         );
 
         if ret.is_ok() {
-            // self.mmc_set_timing(MMC_TIMING_MMC_HS);
+            self.mmc_set_timing(MMC_TIMING_MMC_HS);
         }
 
         ret
@@ -193,7 +195,7 @@ impl<T: MmcHostOps> MmcHost<T> {
         let cmd = MmcCommand::new(MMC_SELECT_CARD, rca << 16, MMC_RSP_R1);
         self.host_ops().mmc_send_command(&cmd, None).unwrap();
 
-        debug!("cmd7: {:#x}", self.get_response().as_r1());
+        trace!("cmd7: {:#x}", self.get_response().as_r1());
 
         Ok(())
     }
@@ -693,7 +695,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             if #[cfg(feature = "dma")] {
                 let mut ext_csd: DVec<u8> = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice).unwrap();
                 let mut test_csd = DVec::zeros(MMC_MAX_BLOCK_LEN as usize, 0x1000, Direction::FromDevice)
-        .ok_or(SdError::MemoryError)?;
+                    .ok_or(MmcHostError::MemoryError)?;
             } else if #[cfg(feature = "pio")] {
                 let mut ext_csd: [u8; 512] = [0; 512];
                 let mut test_csd: [u8; 512] = [0; 512];

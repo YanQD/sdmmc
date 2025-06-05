@@ -1,3 +1,4 @@
+#[cfg(feature = "pio")]
 use core::sync::atomic::{Ordering, fence};
 
 use crate::{
@@ -6,10 +7,12 @@ use crate::{
     delay_us,
     host::{MmcHostError, MmcHostResult, rockchip::SdhciHost},
 };
+
 use log::{info, trace, warn};
 
 const CMD_DEFAULT_TIMEOUT: u32 = 100;
 const CMD_MAX_TIMEOUT: u32 = 500;
+const EMMC_DEFAULT_BOUNDARY_ARG: u16 = 7;
 // const READ_STATUS_TIMEOUT: u32 = 1000;
 
 impl SdhciHost {
@@ -78,17 +81,53 @@ impl SdhciHost {
                 mode |= EMMC_TRNS_READ;
             }
 
-            self.write_reg16(
-                EMMC_BLOCK_SIZE,
-                (cmd.block_size & 0xFFF).try_into().unwrap(),
-            );
-            self.write_reg16(EMMC_BLOCK_COUNT, cmd.block_count);
+            #[cfg(feature = "dma")]
+            {
+                // Configure transfer mode
+                self.write_reg16(EMMC_XFER_MODE, mode);
 
-            self.write_reg16(EMMC_XFER_MODE, mode);
-            match data_buffer {
-                Some(DataBuffer::Read(_)) if cmd.data_dir_read => {}
-                Some(DataBuffer::Write(_)) if !cmd.data_dir_read => {}
-                _ => return Err(MmcHostError::InvalidValue),
+                match data_buffer {
+                    Some(DataBuffer::Read(ref read_buf)) if cmd.data_dir_read => {
+                        let ptr = read_buf.bus_addr() as usize;
+
+                        trace!("Read buffer address: {:#x}", ptr);
+                        self.write_reg32(EMMC_SDMASA, ptr as u32);
+                    }
+                    Some(DataBuffer::Write(write_buf)) if !cmd.data_dir_read => {
+                        let ptr = write_buf.as_ptr() as usize;
+                        let start_addr = ptr as u32;
+                        self.write_reg32(EMMC_SDMASA, start_addr);
+                    }
+                    _ => return Err(MmcHostError::InvalidValue),
+                }
+
+                mode |= EMMC_TRNS_DMA;
+
+                // Set block size and count
+                self.write_reg16(
+                    EMMC_BLOCK_SIZE,
+                    (((EMMC_DEFAULT_BOUNDARY_ARG & 0x7) << 12) | (cmd.block_size & 0xFFF))
+                        .try_into()
+                        .unwrap(),
+                );
+                self.write_reg16(EMMC_BLOCK_COUNT, cmd.block_count);
+                self.write_reg16(EMMC_XFER_MODE, mode);
+            }
+
+            #[cfg(feature = "pio")]
+            {            
+                self.write_reg16(
+                    EMMC_BLOCK_SIZE,
+                    (cmd.block_size & 0xFFF).try_into().unwrap(),
+                );
+                self.write_reg16(EMMC_BLOCK_COUNT, cmd.block_count);
+
+                self.write_reg16(EMMC_XFER_MODE, mode);
+                match data_buffer {
+                    Some(DataBuffer::Read(_)) if cmd.data_dir_read => {}
+                    Some(DataBuffer::Write(_)) if !cmd.data_dir_read => {}
+                    _ => return Err(MmcHostError::InvalidValue),
+                }
             }
         } else if cmd.resp_type & MMC_RSP_BUSY != 0 {
             // For commands with BUSY but no data, still set timeout control
@@ -209,9 +248,12 @@ impl SdhciHost {
         // Process data transfer part
         if cmd.data_present {
             trace!("Data transfer: cmd.data_present={}", cmd.data_present);
-            if let Some(buffer) = &mut data_buffer {
+            if let Some(_buffer) = &mut data_buffer {
+                #[cfg(feature = "dma")]
+                self.transfer_data_by_dma()?;
+
                 #[cfg(not(feature = "dma"))]
-                match buffer {
+                match _buffer {
                     DataBuffer::Read(buf) => self.read_buffer(buf).unwrap(),
                     DataBuffer::Write(buf) => self.write_buffer(buf).unwrap(),
                 }
@@ -229,6 +271,7 @@ impl SdhciHost {
 
     /// Write data to SD card buffer register
     /// This is a lower-level function used by data transfer operations
+    #[cfg(feature = "pio")]
     pub fn write_buffer(&self, buffer: &[u8]) -> MmcHostResult {
         // Wait until space is available in the controller buffer
         self.wait_for_interrupt(EMMC_INT_SPACE_AVAIL, 100)?;
@@ -267,6 +310,7 @@ impl SdhciHost {
 
     /// Read data from SD card buffer register
     /// This is a lower-level function used by data transfer operations
+    #[cfg(feature = "pio")]
     fn read_buffer(&self, buffer: &mut [u8]) -> MmcHostResult {
         // Wait until data is available in the controller buffer
         self.wait_for_interrupt(EMMC_INT_DATA_AVAIL, 100)?;
@@ -306,6 +350,7 @@ impl SdhciHost {
     /// Parameters:
     /// - flag: The interrupt flag to wait for
     /// - timeout_count: Maximum number of iterations to wait
+    #[cfg(feature = "pio")]
     fn wait_for_interrupt(&self, flag: u32, timeout_count: u32) -> MmcHostResult {
         for _ in 0..timeout_count {
             // Read the current interrupt status
@@ -339,5 +384,59 @@ impl SdhciHost {
 
         // Timeout, return error
         Err(MmcHostError::Timeout)
+    }
+
+    /// Transfer data using DMA mode
+    /// This function polls for transfer completion or errors
+    #[cfg(feature = "dma")]
+    pub fn transfer_data_by_dma(&self) -> MmcHostResult {
+        let mut timeout = 100;
+
+        loop {
+            // Read the interrupt status register
+            let stat = self.read_reg16(EMMC_NORMAL_INT_STAT);
+            trace!("Transfer status: {:#b}", stat);
+
+            // Check for any errors during transfer
+            if stat & EMMC_INT_ERROR as u16 != 0 {
+                let err_status = self.read_reg16(EMMC_ERROR_INT_STAT);
+                trace!(
+                    "Data transfer error: status={:#b}, err_status={:#b}",
+                    stat, err_status
+                );
+
+                self.reset(EMMC_RESET_DATA)?;
+
+                // Determine specific error type based on error status bits
+                let err = if err_status & 0x10 != 0 {
+                    MmcHostError::Timeout
+                } else if err_status & 0x20 != 0 {
+                    MmcHostError::DataError
+                } else {
+                    MmcHostError::UnsupportedOperation
+                };
+                return Err(err);
+            }
+
+            // Check if data transfer is complete
+            if stat & EMMC_INT_DATA_END as u16 != 0 {
+                // Clear the data end interrupt flag
+                self.write_reg16(EMMC_NORMAL_INT_STAT, EMMC_INT_DATA_END as u16);
+                break;
+            }
+
+            // Handle timeout to prevent infinite loop
+            if timeout > 0 {
+                use crate::delay_us;
+
+                timeout -= 1;
+                delay_us(1000); // Wait 1ms before checking again
+            } else {
+                warn!("Data transfer timeout");
+                return Err(MmcHostError::Timeout);
+            }
+        }
+
+        Ok(())
     }
 }

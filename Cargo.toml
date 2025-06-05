@@ -18,7 +18,7 @@ paste = "1.0.15"
 cfg-if = "1.0"
 
 [features]
-default = ["pio"]
+default = ["dma"]
 dma = []
 pio = []
 rockchip = []

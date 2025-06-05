@@ -6,6 +6,8 @@ use crate::{
     delay_us,
     host::{MmcHostError, MmcHostOps, MmcHostResult},
 };
+#[cfg(feature = "dma")]
+use dma_api::DVec;
 use log::{debug, info};
 
 impl<T: MmcHostOps> MmcHost<T> {
@@ -168,7 +170,25 @@ impl<T: MmcHostOps> MmcHost<T> {
         Err(MmcHostError::Timeout)
     }
 
+    #[cfg(feature = "dma")]
+    pub fn mmc_send_ext_csd(&mut self, ext_csd: &mut DVec<u8>) -> MmcHostResult {
+        let cmd = MmcCommand::new(MMC_SEND_EXT_CSD, 0, MMC_RSP_R1).with_data(
+            MMC_MAX_BLOCK_LEN as u16,
+            1,
+            true,
+        );
+
+        self.host_ops()
+            .mmc_send_command(&cmd, Some(DataBuffer::Read(ext_csd)))?;
+
+        // debug!("CMD8: {:#x}",self.get_response().as_r1());
+        // debug!("EXT_CSD read successfully, rev: {}", ext_csd[EXT_CSD_REV as usize]);
+
+        Ok(())
+    }
+
     // Send CMD8 to get EXT_CSD
+    #[cfg(feature = "pio")]
     pub fn mmc_send_ext_csd(&mut self, ext_csd: &mut [u8; 512]) -> MmcHostResult {
         let cmd = MmcCommand::new(MMC_SEND_EXT_CSD, 0, MMC_RSP_R1).with_data(
             MMC_MAX_BLOCK_LEN as u16,

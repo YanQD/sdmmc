@@ -27,7 +27,7 @@ pub enum MmcHostError {
     InvalidRegister,
     InvalidValue,
     HardwareError,
-    GpioError,
+    IoError,
     UnsupportedOperation,
     DeviceNotFound,
     ProbeFailure,
@@ -36,6 +36,7 @@ pub enum MmcHostError {
     CommandError,
     DataError,
     Timeout,
+    MemoryError,
 }
 
 impl Display for MmcHostError {
@@ -48,7 +49,7 @@ impl Display for MmcHostError {
             MmcHostError::InvalidRegister => write!(f, "Invalid register"),
             MmcHostError::InvalidValue => write!(f, "Invalid value"),
             MmcHostError::HardwareError => write!(f, "Hardware error"),
-            MmcHostError::GpioError => write!(f, "GPIO error"),
+            MmcHostError::IoError => write!(f, "IO error"),
             MmcHostError::UnsupportedOperation => write!(f, "Unsupported operation"),
             MmcHostError::DeviceNotFound => write!(f, "Device not found"),
             MmcHostError::ProbeFailure => write!(f, "Probe failure"),
@@ -57,6 +58,7 @@ impl Display for MmcHostError {
             MmcHostError::CommandError => write!(f, "Command execution error"),
             MmcHostError::DataError => write!(f, "Data transfer error"),
             MmcHostError::Timeout => write!(f, "Operation timed out"),
+            MmcHostError::MemoryError => write!(f, "Memory allocation error"),
         }
     }
 }

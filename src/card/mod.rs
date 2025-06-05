@@ -126,18 +126,3 @@ impl MmcCard {
         self.base_info = base_info;
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CardState {
-    Idle = 0,  // idle state
-    Ready = 1, // ready state
-    Ident = 2, // identification state
-    Stby = 3,  // stand-by state
-    Tran = 4,  // transfer state
-    Data = 5,  // sending-data state
-    Rcv = 6,   // receive-data state
-    Prg = 7,   // programming state
-    Dis = 8,   // disconnect state
-    Btst = 9,  // bus-test state
-    Slp = 10,  // sleep state
-}
