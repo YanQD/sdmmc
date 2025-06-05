@@ -18,12 +18,7 @@ mod tests {
     use log::{info, warn};
     use rk3568_clk::{CRU, cru_clksel_con28_bits::*};
     use sdmmc::core::MmcHost;
-    use sdmmc::{
-        Kernel,
-        clock::{Clk, ClkError, init_global_clk},
-        host::rockship::SdhciHost,
-        set_impl,
-    };
+    use sdmmc::{Clk, ClkError, Kernel, host::rockchip::SdhciHost, init_global_clk, set_impl};
 
     /// 频率常量
     const MHZ: u32 = 1_000_000;

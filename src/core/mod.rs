@@ -1,5 +1,9 @@
 pub mod block;
-pub mod cmd;
+
+mod cmd;
+mod ext;
+mod sd;
+mod mmc;
 
 extern crate alloc;
 use alloc::string::String;
@@ -11,16 +15,15 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::panic;
 
-use crate::aux::*;
-use crate::card::CardType;
-use crate::card::MmcCard;
-use crate::constants::*;
-use crate::delay_us;
-use crate::host::MmcHostError;
-use crate::host::MmcHostOps;
-use crate::host::MmcHostResult;
-
-use super::commands::MmcCommand;
+use super::common::commands::MmcCommand;
+use crate::common::HostCapabilities;
+use crate::{
+    aux::*,
+    card::{CardType, MmcCard},
+    constants::*,
+    delay_us,
+    host::{MmcHostError, MmcHostOps, MmcHostResult},
+};
 
 #[derive(Debug)]
 pub struct UDevice {
@@ -28,13 +31,8 @@ pub struct UDevice {
     pub compatible: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct MmcHostInfo {
-    pub clock_base: u32,
-    pub voltages: u32,
-    pub quirks: u32,
-    pub host_caps: u32,
-    pub version: u16,
-
     pub timing: u32,
     pub bus_width: u8,
     pub clock: u32,
@@ -43,20 +41,26 @@ pub struct MmcHostInfo {
 impl MmcHostInfo {
     pub fn new() -> Self {
         MmcHostInfo {
-            clock_base: 0,
-            voltages: 0,
-            quirks: 0,
-            host_caps: 0,
-            version: 0,
-
             timing: MMC_TIMING_LEGACY,
-            bus_width: 1, // Default to 1-bit bus width
+            bus_width: 1,  // Default to 1-bit bus width
             clock: 400000, // Default to 400 kHz
         }
     }
+
+    pub fn set_timing(&mut self, timing: u32) {
+        self.timing = timing;
+    }
+
+    pub fn set_bus_width(&mut self, bus_width: u8) {
+        self.bus_width = bus_width;
+    }
+
+    pub fn set_clock(&mut self, clock: u32) {
+        self.clock = clock;
+    }
 }
 
-pub struct MmcHost<T: MmcHostOps>{
+pub struct MmcHost<T: MmcHostOps> {
     pub name: String,
     pub card: Option<MmcCard>,
     pub host_info: MmcHostInfo,
@@ -77,6 +81,14 @@ impl<T: MmcHostOps> MmcHost<T> {
         info!("eMMC host initialization started");
 
         self.host_ops_mut().init_host().unwrap();
+
+        // Set initial bus width to 1-bit
+        self.mmc_set_bus_width(MMC_BUS_WIDTH_1BIT);
+
+        // Set initial clock and wait for it to stabilize
+        self.mmc_set_clock(400000);
+
+        self.mmc_set_timing(MMC_TIMING_LEGACY);
 
         if self.is_card_present() {
             let mmc_card = MmcCard::new();
@@ -106,6 +118,14 @@ impl<T: MmcHostOps> MmcHost<T> {
 
     fn host_ops_mut(&mut self) -> &mut T {
         &mut self.host_ops
+    }
+
+    fn mmc_host_info(&self) -> &MmcHostInfo {
+        &self.host_info
+    }
+
+    fn mmc_host_info_mut(&mut self) -> &mut MmcHostInfo {
+        &mut self.host_info
     }
 
     // Check if card is present
@@ -158,7 +178,7 @@ impl<T: MmcHostOps> MmcHost<T> {
         );
 
         if ret.is_ok() {
-            self.host_ops_mut().mmc_set_timing(MMC_TIMING_MMC_HS);
+            // self.mmc_set_timing(MMC_TIMING_MMC_HS);
         }
 
         ret
@@ -188,7 +208,12 @@ impl<T: MmcHostOps> MmcHost<T> {
         // CMD1: Send operation condition (OCR) and wait for card ready
         let ocr = 0x00; // Voltage window: 2.7V to 3.6V
         let retry = 100;
-        let ocr = self.mmc_send_op_cond(ocr, retry)?;
+
+        let voltages = {
+            let capabilities = self.host_ops().get_capabilities();
+            capabilities.get_voltages()
+        };
+        let ocr = self.mmc_send_op_cond(ocr, retry, voltages)?;
         let high_capacity = (ocr & OCR_HCS) == OCR_HCS;
 
         let card_mut = self.card_mut().unwrap();
@@ -209,31 +234,13 @@ impl<T: MmcHostOps> MmcHost<T> {
         let csd = self.mmc_send_csd()?;
 
         // Determine card version from CSD if unknown
-        let card_version = {
-            let card_mut = self.card_mut().unwrap();
-            card_mut.base_info().card_version()
-        };
-
-        if card_version == MMC_VERSION_UNKNOWN {
-            let card_mut = self.card_mut().unwrap();
-            let csd_version = (card_mut.base_info().csd()[0] >> 26) & 0xf;
-            debug!("eMMC CSD version: {}", csd_version);
-            match csd_version {
-                0 => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_2),
-                1 => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_4),
-                2 => card_mut.base_info_mut().set_card_version(MMC_VERSION_2_2),
-                3 => card_mut.base_info_mut().set_card_version(MMC_VERSION_3),
-                4 => card_mut.base_info_mut().set_card_version(MMC_VERSION_4),
-                _ => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_2),
-            }
-        }
+        self.parse_csd_and_set_version(&csd)?;
 
         // Extract parameters from CSD for frequency, size, and block lengths
-        let (freq, mult, dsr_imp, mut read_bl_len, mut write_bl_len, csize, cmult) = {
+        let (freq, mult, mut read_bl_len, mut write_bl_len, csize, cmult) = {
             let card_mut = self.card_mut().unwrap();
             let freq = FBASE[(csd[0] & 0x7) as usize];
             let mult = MULTIPLIERS[((csd[0] >> 3) & 0xf) as usize];
-            let dsr_imp = ((csd[1] >> 12) & 0x1) != 0;
             let read_bl_len = 1 << ((csd[1] >> 16) & 0xf);
             let card_type = card_mut.card_type();
             let write_bl_len = if card_type == CardType::Mmc {
@@ -256,8 +263,7 @@ impl<T: MmcHostOps> MmcHost<T> {
                     (csd[2] & 0x00038000) >> 15,
                 )
             };
-            card_mut.base_info_mut().set_dsr_imp(dsr_imp);
-            (freq, mult, dsr_imp, read_bl_len, write_bl_len, csize, cmult)
+            (freq, mult, read_bl_len, write_bl_len, csize, cmult)
         };
 
         // Calculate user capacity
@@ -279,35 +285,24 @@ impl<T: MmcHostOps> MmcHost<T> {
         card_mut.base_info_mut().set_read_bl_len(read_bl_len);
         card_mut.base_info_mut().set_write_bl_len(write_bl_len);
 
-        // CMD4: Set DSR if required by card
-        let (dsr_needed, dsr) = {
-            let dsr = card_mut.base_info().dsr();
-            ((dsr_imp as u8 != 0) && 0xffffffff != dsr, dsr)
-        };
-
         // Set initial erase group size and partition config
         card_mut.base_info_mut().set_erase_grp_size(1);
         card_mut
             .base_info_mut()
             .set_part_config(MMCPART_NOAVAILABLE);
 
-        if dsr_needed {
-            let dsr_value = { (dsr & 0xffff) << 16 };
-            self.mmc_set_dsr(dsr_value)?;
-        }
+        let dsr_imp = ((csd[1] >> 12) & 0x1) != 0;
+        card_mut.base_info_mut().set_dsr_imp(dsr_imp);
+        
+        // CMD4: Set DSR if required by card
+        self.set_dsr_if_required()?;
 
         self.mmc_select_card()?;
 
         // For eMMC 4.0+, configure high-speed, EXT_CSD and partitions
-        let is_version_4_plus = {
-            let card = self.card().unwrap();
-            let card_type = card.card_type();
-            card_type == CardType::Mmc && card.base_info().card_version() >= MMC_VERSION_4
-        };
-
-        if is_version_4_plus {
+        if self.is_emmc_version_4_plus() {
             self.mmc_select_hs()?; // Switch to high speed
-            self.host_ops_mut().mmc_set_clock(MMC_HIGH_52_MAX_DTR); // Set high-speed clock
+            self.mmc_set_clock(MMC_HIGH_52_MAX_DTR); // Set high-speed clock
 
             // Allocate buffer for EXT_CSD read
             cfg_if::cfg_if! {
@@ -488,9 +483,69 @@ impl<T: MmcHostOps> MmcHost<T> {
             }
         }
 
-        // Final initialization steps
+        // Final configuration
+        self.finalize_card_initialization()?;
+
+        Ok(())
+    }
+
+    // Set DSR if required by card
+    fn set_dsr_if_required(&mut self) -> MmcHostResult {
+        let card_mut = self.card_mut().unwrap();
+        let (dsr_needed, dsr) = {
+            let dsr = card_mut.base_info().dsr();
+            let dsr_imp = card_mut.base_info().dsr_imp();
+            ((dsr_imp as u8 != 0) && 0xffffffff != dsr, dsr)
+        };
+
+        if dsr_needed {
+            let dsr_value = (dsr & 0xffff) << 16;
+            self.mmc_set_dsr(dsr_value)?;
+        }
+        
+        Ok(())
+    }
+
+    // Determine card version from CSD if unknown
+    fn parse_csd_and_set_version(&mut self, csd: &[u32; 4]) -> MmcHostResult {
+        let card_version = {
+            let card_mut = self.card_mut().unwrap();
+            card_mut.base_info().card_version()
+        };
+
+        if card_version == MMC_VERSION_UNKNOWN {
+            let card_mut = self.card_mut().unwrap();
+            let csd_version = (csd[0] >> 26) & 0xf;
+            debug!("eMMC CSD version: {}", csd_version);
+            match csd_version {
+                0 => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_2),
+                1 => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_4),
+                2 => card_mut.base_info_mut().set_card_version(MMC_VERSION_2_2),
+                3 => card_mut.base_info_mut().set_card_version(MMC_VERSION_3),
+                4 => card_mut.base_info_mut().set_card_version(MMC_VERSION_4),
+                _ => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_2),
+            }
+        }
+        
+        Ok(())
+    }
+
+    // Check if card is eMMC 4.0+
+    fn is_emmc_version_4_plus(&self) -> bool {
+        let card = self.card().unwrap();
+        let card_type = card.card_type();
+        card_type == CardType::Mmc && card.base_info().card_version() >= MMC_VERSION_4
+    }
+
+    // Final initialization steps
+    fn finalize_card_initialization(&mut self) -> MmcHostResult {
+        let host_caps = {
+            let capabilities = self.host_ops().get_capabilities();
+            capabilities.get_host_caps()
+        };
+        
         self.mmc_set_capacity(0)?;
-        self.mmc_change_freq()?;
+        self.mmc_change_freq(host_caps)?;
         self.card_mut().unwrap().set_initialized(true);
 
         Ok(())
@@ -529,7 +584,7 @@ impl<T: MmcHostOps> MmcHost<T> {
         Ok(())
     }
 
-    pub fn mmc_change_freq(&mut self) -> MmcHostResult {
+    pub fn mmc_change_freq(&mut self, host_caps: u32) -> MmcHostResult {
         let card_mut = self.card_mut().unwrap();
         // let mmc_ext = card_mut.cardext_mut().unwrap().as_mut_mmc().unwrap();
         // Allocate buffer for EXT_CSD depending on whether DMA or PIO is enabled
@@ -561,12 +616,12 @@ impl<T: MmcHostOps> MmcHost<T> {
         self.mmc_send_ext_csd(&mut ext_csd)?;
 
         // Determine supported high-speed modes from EXT_CSD
-        let avail_type = self.host_ops().mmc_select_card_type(&ext_csd);
+        let avail_type = self.mmc_select_card_type(&ext_csd, host_caps);
 
         // Select the appropriate high-speed mode supported by both host and card
         let result = if avail_type & EXT_CSD_CARD_TYPE_HS200 != 0 {
             // HS200 mode
-            self.mmc_select_hs200()
+            self.mmc_select_hs200(host_caps)
         } else if avail_type & EXT_CSD_CARD_TYPE_HS != 0 {
             // Standard high-speed mode
             self.mmc_select_hs()
@@ -578,23 +633,23 @@ impl<T: MmcHostOps> MmcHost<T> {
         result?;
 
         // Configure the bus speed according to selected type
-        self.host_ops_mut().mmc_set_bus_speed(avail_type as u32);
+        self.mmc_set_bus_speed(avail_type as u32);
 
         // If HS200 mode was selected, perform tuning procedure
-        if self.host_ops().mmc_card_hs200() {
-            let tuning_result = self.host_ops_mut().mmc_hs200_tuning();
+        if self.mmc_card_hs200() {
+            let tuning_result = self.mmc_hs200_tuning();
 
             // Optionally upgrade to HS400 mode if supported and using 8-bit bus
-            let bus_width = self.host_ops().bus_width();
+            let bus_width = self.mmc_host_info().bus_width;
             if avail_type & EXT_CSD_CARD_TYPE_HS400 != 0 && bus_width == MMC_BUS_WIDTH_8BIT {
                 // self.mmc_select_hs400()?; // Currently not executed
-                self.host_ops_mut().mmc_set_bus_speed(avail_type as u32);
+                self.mmc_set_bus_speed(avail_type as u32);
             }
 
             tuning_result.map_err(|_| MmcHostError::CommandError)
-        } else if !self.host_ops().mmc_card_hs400es() {
+        } else if !self.mmc_card_hs400es() {
             // If not in HS400 Enhanced Stroxbe mode, try to switch bus width
-            let width_result = self.mmc_select_bus_width()?;
+            let width_result = self.mmc_select_bus_width(host_caps)?;
             let err = if width_result > 0 {
                 Ok(())
             } else {
@@ -613,8 +668,8 @@ impl<T: MmcHostOps> MmcHost<T> {
         }
     }
 
-    pub fn mmc_select_hs200(&mut self) -> MmcHostResult {
-        let ret = self.mmc_select_bus_width()?;
+    pub fn mmc_select_hs200(&mut self, host_caps: u32) -> MmcHostResult {
+        let ret = self.mmc_select_bus_width(host_caps)?;
 
         if ret > 0 {
             self.mmc_switch(
@@ -624,13 +679,13 @@ impl<T: MmcHostOps> MmcHost<T> {
                 false,
             )?;
 
-            self.host_ops_mut().mmc_set_timing(MMC_TIMING_MMC_HS200);
+            self.mmc_set_timing(MMC_TIMING_MMC_HS200);
         }
 
         Ok(())
     }
 
-    fn mmc_select_bus_width(&mut self) -> MmcHostResult<i32> {
+    fn mmc_select_bus_width(&mut self, host_caps: u32) -> MmcHostResult<i32> {
         let ext_csd_bits: [u8; 2] = [EXT_CSD_BUS_WIDTH_8, EXT_CSD_BUS_WIDTH_4];
         let bus_widths: [u8; 2] = [MMC_BUS_WIDTH_8BIT, MMC_BUS_WIDTH_4BIT];
 
@@ -646,7 +701,6 @@ impl<T: MmcHostOps> MmcHost<T> {
         }
 
         // Check if host supports 4-bit or 8-bit bus width
-        let host_caps = self.host_ops().host_caps();
         let version = self.card().unwrap().base_info().card_version();
         if version < MMC_VERSION_4 || (host_caps & (MMC_MODE_4BIT | MMC_MODE_8BIT)) == 0 {
             return Ok(0);
@@ -674,7 +728,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
             let bus_width = bus_widths[idx];
 
-            self.host_ops_mut().mmc_set_bus_width(bus_width);
+            self.mmc_set_bus_width(bus_width);
 
             // 再次读取EXT_CSD进行验证
             let test_result = self.mmc_send_ext_csd(&mut test_csd);

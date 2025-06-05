@@ -1,4 +1,3 @@
-
 #[macro_export]
 macro_rules! impl_register_ops {
     ($struct_name:ident, $field_name:ident) => {

@@ -3,15 +3,16 @@
 #![feature(alloc_error_handler)]
 
 mod aux;
-pub mod card;
-pub mod clock;
-pub mod commands;
-pub mod constants;
+mod card;
+mod common;
+mod constants;
+
 pub mod core;
 pub mod host;
-pub mod regs;
 
 use log::warn;
+
+pub use crate::common::clock::*;
 
 pub const BLOCK_SIZE: usize = 512;
 

@@ -1,10 +1,10 @@
 use crate::{
     aux::dll_lock_wo_tmout,
-    clock::emmc_set_clk,
-    commands::MmcCommand,
+    common::clock::emmc_set_clk,
     constants::*,
+    core::MmcHostInfo,
     delay_us,
-    host::{rockship::SdhciHost, MmcHostError, MmcHostResult},
+    host::{MmcHostError, MmcHostResult, rockchip::SdhciHost},
 };
 use log::{debug, info};
 
@@ -19,7 +19,7 @@ pub struct EMmcChipConfig {
 }
 
 impl EMmcChipConfig {
-    fn rk3568_config() -> Self {
+    pub fn rk3568_config() -> Self {
         Self {
             flags: RK_RXCLK_NO_INVERTER,
             hs200_tx_tap: 16,
@@ -33,15 +33,17 @@ impl EMmcChipConfig {
 
 impl SdhciHost {
     /// Set the SDHCI EMMC controller's I/O settings
-    pub fn sdhci_set_ios(&mut self) {
-        let (card_clock, bus_width, timing) = (self.clock, self.bus_width, self.timing);
+    pub fn sdhci_set_ios(&mut self, mmc_current: &MmcHostInfo) {
+        let (card_clock, bus_width, timing) =
+            (mmc_current.clock, mmc_current.bus_width, mmc_current.timing);
 
         debug!(
             "card_clock: {}, bus_width: {}, timing: {}",
             card_clock, bus_width, timing
         );
 
-        self.dwcmshc_sdhci_emmc_set_clock(card_clock).unwrap();
+        self.dwcmshc_sdhci_emmc_set_clock(card_clock, timing)
+            .unwrap();
 
         /* Set bus width */
         let mut ctrl = self.read_reg8(EMMC_HOST_CTRL1);
@@ -80,7 +82,7 @@ impl SdhciHost {
             self.sdhci_set_power(MMC_VDD_165_195_SHIFT).unwrap();
         }
 
-        self.sdhci_set_uhs_signaling();
+        self.sdhci_set_uhs_signaling(timing);
     }
 
     pub fn mmc_card_busy(&self) -> bool {
@@ -227,9 +229,8 @@ impl SdhciHost {
     }
 
     /// Sets the clock for the DWCMSHC SDHCI EMMC controller.
-    fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32) -> MmcHostResult {
+    fn dwcmshc_sdhci_emmc_set_clock(&mut self, freq: u32, timing: u32) -> MmcHostResult {
         let mut timeout = 500;
-        let timing = self.timing;
         let data = EMmcChipConfig::rk3568_config();
 
         self.rockchip_emmc_set_clock(freq)?;
@@ -353,9 +354,7 @@ impl SdhciHost {
         Ok(())
     }
 
-    fn sdhci_set_uhs_signaling(&self) {
-        let timing = self.timing;
-
+    fn sdhci_set_uhs_signaling(&self, timing: u32) {
         let mut ctrl_2 = self.read_reg16(EMMC_HOST_CTRL2);
         ctrl_2 &= !MMC_CTRL_UHS_MASK;
 
@@ -387,183 +386,5 @@ impl SdhciHost {
 
     fn sdhci_get_version(&self) -> u16 {
         self.read_reg16(EMMC_HOST_CNTRL_VER) & 0xFF
-    }
-
-    pub fn mmc_card_hs400es(&self) -> bool {
-        let timing = self.timing;
-        timing == MMC_TIMING_MMC_HS400ES
-    }
-
-    /// check if the card is in HS200 mode
-    pub fn mmc_card_hs200(&self) -> bool {
-        let timing = self.timing;
-        timing == MMC_TIMING_MMC_HS200
-    }
-
-    /// check if the card supports high-speed modes
-    fn mmc_card_hs(&self) -> bool {
-        let timing = self.timing;
-        (timing == MMC_TIMING_MMC_HS) || (timing == MMC_TIMING_SD_HS)
-    }
-
-    pub fn mmc_set_bus_speed(&mut self, avail_type: u32) {
-        let mut clock = 0;
-
-        if self.mmc_card_hs() {
-            clock = if (avail_type & EXT_CSD_CARD_TYPE_52 as u32) != 0 {
-                MMC_HIGH_52_MAX_DTR
-            } else {
-                MMC_HIGH_26_MAX_DTR
-            };
-        } else if self.mmc_card_hs200() {
-            clock = MMC_HS200_MAX_DTR;
-        }
-
-        self.mmc_set_clock(clock);
-    }
-
-    pub fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
-        let card_type = ext_csd[EXT_CSD_CARD_TYPE as usize] as u16;
-        let host_caps = self.host_caps;
-        let mut avail_type = 0;
-
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_26 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_26;
-        }
-
-        if (host_caps & MMC_MODE_HS != 0) && (card_type & EXT_CSD_CARD_TYPE_52 != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_52;
-        }
-
-        if (host_caps & MMC_MODE_DDR_52MHZ != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_DDR_1_8V as u16 != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_DDR_1_8V as u16;
-        }
-
-        if (host_caps & MMC_MODE_HS200 != 0) && (card_type & EXT_CSD_CARD_TYPE_HS200_1_8V != 0) {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400 != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (card_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V | EXT_CSD_CARD_TYPE_HS400_1_8V;
-        }
-
-        if (host_caps & MMC_MODE_HS400ES != 0)
-            && (host_caps & MMC_MODE_8BIT != 0)
-            && (ext_csd[EXT_CSD_STROBE_SUPPORT as usize] != 0)
-            && (avail_type & EXT_CSD_CARD_TYPE_HS400_1_8V != 0)
-        {
-            avail_type |= EXT_CSD_CARD_TYPE_HS200_1_8V
-                | EXT_CSD_CARD_TYPE_HS400_1_8V
-                | EXT_CSD_CARD_TYPE_HS400ES;
-        }
-
-        avail_type
-    }
-
-    /// Send a single tuning block read command over the SDHCI interface
-    fn mmc_send_tuning(&mut self, opcode: u8) -> MmcHostResult {
-        // Helper to pack DMA boundary and block size fields
-        let make_blksz = |dma: u16, blksz: u16| ((dma & 0x7) << 12) | (blksz & 0x0FFF);
-
-        // Determine current bus width (1/4/8 bits)
-        let bus_width = self.bus_width;
-
-        // Choose block size: 128 bytes for HS200 on 8-bit bus, else 64 bytes
-        let block_size = if opcode == MMC_SEND_TUNING_BLOCK_HS200 && bus_width == MMC_BUS_WIDTH_8BIT
-        {
-            128
-        } else {
-            64
-        };
-
-        // Program block size and enable DMA boundary
-        self.write_reg16(EMMC_BLOCK_SIZE, make_blksz(7, block_size));
-        // Set transfer mode to single-block read
-        self.write_reg16(EMMC_XFER_MODE, EMMC_TRNS_READ);
-
-        // Build and send the tuning command
-        let cmd = MmcCommand::new(opcode, 0, MMC_RSP_R1);
-        self.send_command(&cmd, None).unwrap();
-
-        Ok(())
-    }
-
-    /// Perform HS200 tuning sequence (also used for HS400 initial tuning)
-    pub fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
-        let opcode = MMC_SEND_TUNING_BLOCK_HS200;
-        let timing = self.timing;
-
-        match timing {
-            // HS400 tuning must be issued in HS200 mode; reject direct HS400 timing
-            MMC_TIMING_MMC_HS400 => {
-                return Err(MmcHostError::InvalidValue);
-            }
-            // HS200 timing: OK to proceed with tuning here
-            MMC_TIMING_MMC_HS200 => {
-                // HS400 re-tuning is not expected; leave periodic tuning disabled
-            }
-            // Any other timing mode is invalid for HS200 tuning
-            _ => {
-                return Err(MmcHostError::InvalidValue);
-            }
-        }
-
-        // Set the EXEC_TUNING bit in Host Control2 to start tuning
-        let mut ctrl = self.read_reg16(EMMC_HOST_CTRL2);
-        ctrl |= MMC_CTRL_EXEC_TUNING;
-        self.write_reg16(EMMC_HOST_CTRL2, ctrl);
-
-        // Invoke the common tuning loop implementation
-        self.__emmc_execute_tuning(opcode)
-    }
-
-    /// Core tuning loop: send tuning blocks until the controller indicates success or timeout
-    fn __emmc_execute_tuning(&mut self, opcode: u8) -> MmcHostResult {
-        const MAX_TUNING_LOOP: usize = 40;
-
-        for _ in 0..MAX_TUNING_LOOP {
-            // Send one tuning block command
-            self.mmc_send_tuning(opcode)?;
-
-            // Read back Host Control2 to check tuning status
-            let ctrl = self.read_reg16(EMMC_HOST_CTRL2);
-
-            // If the EXEC_TUNING bit has been cleared by hardware...
-            if (ctrl & MMC_CTRL_EXEC_TUNING) == 0 {
-                // ...and the TUNED_CLK bit is set, tuning succeeded
-                if (ctrl & MMC_CTRL_TUNED_CLK) != 0 {
-                    return Ok(());
-                }
-                // EXEC_TUNING cleared but no TUNED_CLK => break and report failure
-                break;
-            }
-        }
-
-        // Exceeded max loops without success: timeout
-        Err(MmcHostError::Timeout)
-    }
-
-    pub fn mmc_set_bus_width(&mut self, width: u8) {
-        /* Set bus width */
-        self.bus_width = width;
-        debug!("Bus width set to {}", width);
-        self.sdhci_set_ios();
-    }
-
-    pub fn mmc_set_timing(&mut self, timing: u32) {
-        /* Set timing */
-        self.timing = timing;
-        self.sdhci_set_ios();
-    }
-
-    pub fn mmc_set_clock(&mut self, clk: u32) {
-        /* Set clock */
-        self.clock = clk;
-        self.sdhci_set_ios();
     }
 }

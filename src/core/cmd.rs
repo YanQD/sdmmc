@@ -1,6 +1,6 @@
 use crate::{
     card::{CardExt, CardType},
-    commands::{DataBuffer, MmcCommand, MmcResponse},
+    common::commands::{DataBuffer, MmcCommand, MmcResponse},
     constants::*,
     core::MmcHost,
     delay_us,
@@ -21,7 +21,12 @@ impl<T: MmcHostOps> MmcHost<T> {
     }
 
     // Send CMD1 to set OCR and check if card is ready
-    pub fn mmc_send_op_cond(&mut self, ocr: u32, mut retry: u32) -> MmcHostResult<u32> {
+    pub fn mmc_send_op_cond(
+        &mut self,
+        ocr: u32,
+        mut retry: u32,
+        voltages: u32,
+    ) -> MmcHostResult<u32> {
         // First command to get capabilities
 
         let mut cmd = MmcCommand::new(MMC_SEND_OP_COND, ocr, MMC_RSP_R3);
@@ -39,9 +44,8 @@ impl<T: MmcHostOps> MmcHost<T> {
         let ocr_voltage_mask = 0x007FFF80;
         let ocr_access_mode = 0x60000000;
 
-        let cmd_arg = ocr_hcs
-            | (self.host_ops().voltages() & (card_ocr & ocr_voltage_mask))
-            | (card_ocr & ocr_access_mode);
+        let cmd_arg =
+            ocr_hcs | (voltages & (card_ocr & ocr_voltage_mask)) | (card_ocr & ocr_access_mode);
 
         // info!("eMMC CMD1 arg for retries: {:#x}", cmd_arg);
 
@@ -88,8 +92,6 @@ impl<T: MmcHostOps> MmcHost<T> {
         if !ready {
             return Err(MmcHostError::UnsupportedOperation);
         }
-
-        delay_us(1000);
 
         debug!(
             "Clock control before CMD2: 0x{:x}, stable: {}",

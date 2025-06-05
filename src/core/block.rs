@@ -1,11 +1,13 @@
-use crate::commands::{DataBuffer, MmcCommand};
-use crate::core::MmcHost;
-use crate::host::MmcHostOps;
 #[cfg(feature = "pio")]
 use crate::host::MmcHostResult;
-use crate::{card::CardType, constants::*};
+use crate::{
+    card::CardType,
+    common::commands::{DataBuffer, MmcCommand},
+    constants::*,
+    core::MmcHost,
+    host::{MmcHostError, MmcHostOps},
+};
 use log::{info, trace};
-use crate::host::MmcHostError;
 
 impl<T: MmcHostOps> MmcHost<T> {
     /// Read blocks from SD card using PIO (Programmed I/O) mode
@@ -15,7 +17,6 @@ impl<T: MmcHostOps> MmcHost<T> {
     /// - buffer: Buffer to store the read data
     #[cfg(feature = "pio")]
     pub fn read_blocks(&self, block_id: u32, blocks: u16, buffer: &mut [u8]) -> MmcHostResult {
-
         trace!(
             "pio read_blocks: block_id = {}, blocks = {}",
             block_id, blocks

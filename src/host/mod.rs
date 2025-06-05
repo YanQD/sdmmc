@@ -1,15 +1,16 @@
 pub mod pythium;
-pub mod rockship;
+pub mod rockchip;
 
 extern crate alloc;
 use alloc::string::String;
 
+use super::common::commands::DataBuffer;
+use super::common::commands::MmcCommand;
+use crate::common::HostCapabilities;
+use crate::core::MmcHostInfo;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::fmt::Display;
-
-use super::commands::DataBuffer;
-use super::commands::MmcCommand;
 
 #[derive(Debug)]
 pub struct UDevice {
@@ -63,6 +64,8 @@ impl Display for MmcHostError {
 pub type MmcHostResult<T = ()> = Result<T, MmcHostError>;
 
 pub trait MmcHostOps: Debug + Send + Sync {
+    type Capabilities: HostCapabilities;
+
     fn init_host(&mut self) -> MmcHostResult;
 
     fn read_reg32(&self, offset: u32) -> u32;
@@ -74,18 +77,7 @@ pub trait MmcHostOps: Debug + Send + Sync {
 
     fn mmc_send_command(&self, cmd: &MmcCommand, data_buffer: Option<DataBuffer>) -> MmcHostResult;
     fn mmc_card_busy(&self) -> bool;
-    fn mmc_set_ios(&mut self);
+    fn mmc_set_ios(&mut self, mmc_current: &MmcHostInfo);
 
-    fn mmc_card_hs400es(&self) -> bool;
-    fn mmc_card_hs200(&self) -> bool;
-    fn mmc_set_bus_speed(&mut self, avail_type: u32);
-    fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16;
-    fn mmc_hs200_tuning(&mut self) -> MmcHostResult;
-    fn mmc_set_bus_width(&mut self, width: u8);
-    fn mmc_set_timing(&mut self, timing: u32);
-    fn mmc_set_clock(&mut self, clk: u32);
-
-    fn bus_width(&self) -> u8;
-    fn host_caps(&self) -> u32;
-    fn voltages(&self) -> u32;
+    fn get_capabilities(&self) -> Self::Capabilities;
 }

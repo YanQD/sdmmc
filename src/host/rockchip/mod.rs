@@ -1,14 +1,21 @@
-mod block;
+mod caps;
 pub mod clock;
 pub mod cmd;
+pub mod regs;
 
 use core::fmt::Display;
-
-use crate::{aux::generic_fls, constants::*, delay_us, host::{MmcHostError, MmcHostOps, MmcHostResult}, impl_register_ops};
 use log::info;
 
+use crate::{
+    aux::generic_fls,
+    common::commands::{DataBuffer, MmcCommand},
+    constants::*,
+    core::MmcHostInfo,
+    host::{MmcHostError, MmcHostOps, MmcHostResult, rockchip::caps::SdhciCapabilities},
+};
+
 // SD Host Controller structure
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SdhciHost {
     pub base_addr: usize,
     pub clock_base: u32,
@@ -16,31 +23,22 @@ pub struct SdhciHost {
     pub quirks: u32,
     pub host_caps: u32,
     pub version: u16,
-
-    pub timing: u32,
-    pub bus_width: u8,
-    pub clock: u32,
 }
 
 impl Display for SdhciHost {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "SdhciHost(base_addr: {:#x}, clock_base: {}, voltages: {:#x}, quirks: {:#x}, host_caps: {:#x}, version: 0x{:x}, timing: {}, bus_width: {}, clock: {})",
+            "SdhciHost(base_addr: {:#x}, clock_base: {}, voltages: {:#x}, quirks: {:#x}, host_caps: {:#x}, version: 0x{:x})",
             self.base_addr,
             self.clock_base,
             self.voltages,
             self.quirks,
             self.host_caps,
             self.version,
-            self.timing,
-            self.bus_width,
-            self.clock
         )
     }
 }
-
-impl_register_ops!(SdhciHost, base_addr);
 
 impl SdhciHost {
     pub fn new(base_addr: usize) -> Self {
@@ -51,10 +49,6 @@ impl SdhciHost {
             quirks: 0,
             host_caps: 0,
             version: 0,
-
-            timing: MMC_TIMING_LEGACY,
-            bus_width: 1,  // Default to 1-bit bus width
-            clock: 400000, // Default to 400 kHz
         }
     }
 
@@ -139,41 +133,14 @@ impl SdhciHost {
         );
         self.write_reg32(EMMC_SIGNAL_ENABLE, 0x0);
 
-        // Set initial bus width to 1-bit
-        self.mmc_set_bus_width(1);
-
-        // Set initial clock and wait for it to stabilize
-        self.mmc_set_clock(400000);
-
-        self.mmc_set_timing(MMC_TIMING_LEGACY);
-
         info!("EMMC initialization completed successfully");
         Ok(())
     }
-
-    // Reset the controller
-    #[inline]
-    pub fn reset(&self, reset_flag: u8) -> MmcHostResult {
-        // Request reset
-        self.write_reg8(EMMC_SOFTWARE_RESET, reset_flag);
-
-        // Wait for reset to complete with timeout
-        let mut timeout = 20; // Increased timeout
-        while (self.read_reg8(EMMC_SOFTWARE_RESET) & reset_flag) != 0 {
-            if timeout == 0 {
-                return Err(MmcHostError::Timeout);
-            }
-            timeout -= 1;
-            delay_us(1000);
-        }
-
-        Ok(())
-    }
-
-
 }
 
 impl MmcHostOps for SdhciHost {
+    type Capabilities = SdhciCapabilities;
+
     fn init_host(&mut self) -> MmcHostResult {
         self.init_host()
     }
@@ -202,7 +169,7 @@ impl MmcHostOps for SdhciHost {
         self.write_reg32(offset, value)
     }
 
-    fn mmc_send_command(&self, cmd: &crate::commands::MmcCommand, data_buffer: Option<crate::commands::DataBuffer>) -> MmcHostResult {
+    fn mmc_send_command(&self, cmd: &MmcCommand, data_buffer: Option<DataBuffer>) -> MmcHostResult {
         self.send_command(cmd, data_buffer)
     }
 
@@ -210,51 +177,17 @@ impl MmcHostOps for SdhciHost {
         self.mmc_card_busy()
     }
 
-    fn mmc_set_ios(&mut self) {
-        self.sdhci_set_ios();
+    fn mmc_set_ios(&mut self, mmc_current: &MmcHostInfo) {
+        self.sdhci_set_ios(mmc_current)
     }
 
-    fn mmc_card_hs400es(&self) -> bool {
-        self.mmc_card_hs400es()
-    }
-
-    fn mmc_card_hs200(&self) -> bool {
-        self.mmc_card_hs200()
-    }
-
-    fn mmc_set_bus_speed(&mut self, avail_type: u32) {
-        self.mmc_set_bus_speed(avail_type);
-    }
-
-    fn mmc_select_card_type(&self, ext_csd: &[u8]) -> u16 {
-        self.mmc_select_card_type(ext_csd)
-    }
-
-    fn mmc_hs200_tuning(&mut self) -> MmcHostResult {
-        self.mmc_hs200_tuning()
-    }
-
-    fn mmc_set_bus_width(&mut self, width: u8) {
-        self.mmc_set_bus_width(width);
-    }
-
-    fn mmc_set_timing(&mut self, timing: u32) {
-        self.mmc_set_timing(timing);
-    }
-    
-    fn mmc_set_clock(&mut self, clk: u32) {
-        self.mmc_set_clock(clk);
-    }
-
-    fn voltages(&self) -> u32 {
-        self.voltages
-    }
-
-    fn host_caps(&self) -> u32 {
-        self.host_caps
-    }
-
-    fn bus_width(&self) -> u8 {
-        self.bus_width
+    fn get_capabilities(&self) -> Self::Capabilities {
+        SdhciCapabilities {
+            voltages: self.voltages,
+            host_caps: self.host_caps,
+            clock_base: self.clock_base,
+            version: self.version,
+            quirks: self.quirks,
+        }
     }
 }
