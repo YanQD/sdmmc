@@ -1,10 +1,12 @@
+use core::time::Duration;
+
 use crate::{
     card::{CardExt, CardType},
     common::commands::{DataBuffer, MmcCommand, MmcResponse},
     constants::*,
-    core::MmcHost,
-    delay_us,
     host::{MmcHostError, MmcHostOps, MmcHostResult},
+    mci_core::MmcHost,
+    mci_sleep,
 };
 #[cfg(feature = "dma")]
 use dma_api::DVec;
@@ -16,7 +18,7 @@ impl<T: MmcHostOps> MmcHost<T> {
         let cmd = MmcCommand::new(MMC_GO_IDLE_STATE, 0, MMC_RSP_NONE);
         self.host_ops().mmc_send_command(&cmd, None).unwrap();
 
-        delay_us(100);
+        mci_sleep(Duration::from_micros(100));
 
         info!("eMMC reset complete");
         Ok(())
@@ -33,7 +35,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
         let mut cmd = MmcCommand::new(MMC_SEND_OP_COND, ocr, MMC_RSP_R3);
         self.host_ops().mmc_send_command(&cmd, None).unwrap();
-        delay_us(1000);
+        mci_sleep(Duration::from_micros(1000));
 
         // Get response and store it
         let mut card_ocr = self.get_response().as_r3();
@@ -85,7 +87,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             if !ready {
                 retry -= 1;
                 // Delay between retries
-                delay_us(1000);
+                mci_sleep(Duration::from_micros(1000));
             }
         }
 

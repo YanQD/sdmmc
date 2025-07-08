@@ -7,7 +7,7 @@ use alloc::string::String;
 use super::common::commands::DataBuffer;
 use super::common::commands::MmcCommand;
 use crate::common::HostCapabilities;
-use crate::core::MmcHostInfo;
+use crate::mci_core::MmcHostInfo;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::fmt::Display;

@@ -3,13 +3,12 @@ use dma_api::DVec;
 
 use crate::host::MmcHostResult;
 
-
 use crate::{
     card::CardType,
     common::commands::{DataBuffer, MmcCommand},
     constants::*,
-    core::MmcHost,
     host::{MmcHostError, MmcHostOps},
+    mci_core::MmcHost,
 };
 
 use log::trace;
@@ -96,8 +95,8 @@ impl<T: MmcHostOps> MmcHost<T> {
             block_id, blocks
         );
 
-        // Check if card is initialized
-        match &self.card {
+        // Extract card information and check if card exists
+        let card = match &self.card {
             Some(card) => card,
             None => return Err(MmcHostError::DeviceNotFound),
         };
@@ -160,12 +159,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
     /// Read one or more data blocks from the card
     #[cfg(feature = "dma")]
-    pub fn read_blocks(
-        &self,
-        block_id: u32,
-        blocks: u16,
-        buffer: &mut DVec<u8>,
-    ) -> MmcHostResult {
+    pub fn read_blocks(&self, block_id: u32, blocks: u16, buffer: &mut DVec<u8>) -> MmcHostResult {
         // Check if buffer size matches the expected size based on number of blocks
         let expected_size = blocks as usize * 512;
         if buffer.len() != expected_size {
@@ -217,8 +211,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
             // Must send stop transmission command after multiple block read
             let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.host_ops()
-                .mmc_send_command(&stop_cmd, None)?;
+            self.host_ops().mmc_send_command(&stop_cmd, None)?;
         }
 
         Ok(())
@@ -226,12 +219,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
     /// Write multiple blocks to the card
     #[cfg(feature = "dma")]
-    pub fn write_blocks(
-        &self,
-        block_id: u32,
-        blocks: u16,
-        buffer: &DVec<u8>,
-    ) -> MmcHostResult {
+    pub fn write_blocks(&self, block_id: u32, blocks: u16, buffer: &DVec<u8>) -> MmcHostResult {
         // Verify that buffer size matches the requested number of blocks
         let expected_size = blocks as usize * 512;
         if buffer.len() != expected_size {
@@ -293,8 +281,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
             // Must send stop transmission command after multiple block write
             let stop_cmd = MmcCommand::new(MMC_STOP_TRANSMISSION, 0, MMC_RSP_R1B);
-            self.host_ops()
-                .mmc_send_command(&stop_cmd, None)?;
+            self.host_ops().mmc_send_command(&stop_cmd, None)?;
         }
 
         Ok(())

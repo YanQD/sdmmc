@@ -10,8 +10,8 @@ use crate::{
     aux::generic_fls,
     common::commands::{DataBuffer, MmcCommand},
     constants::*,
-    core::MmcHostInfo,
     host::{MmcHostError, MmcHostOps, MmcHostResult, rockchip::caps::SdhciCapabilities},
+    mci_core::MmcHostInfo,
 };
 
 // SD Host Controller structure

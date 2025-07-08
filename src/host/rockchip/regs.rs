@@ -1,8 +1,9 @@
+use core::time::Duration;
+
 use crate::{
     constants::*,
-    delay_us,
     host::{MmcHostError, MmcHostResult, rockchip::SdhciHost},
-    impl_register_ops,
+    impl_register_ops, mci_sleep,
 };
 
 impl_register_ops!(SdhciHost, base_addr);
@@ -22,7 +23,7 @@ impl SdhciHost {
                 return Err(MmcHostError::Timeout);
             }
             timeout -= 1;
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
         }
 
         Ok(())

@@ -1,11 +1,12 @@
 #[cfg(feature = "pio")]
 use core::sync::atomic::{Ordering, fence};
+use core::time::Duration;
 
 use crate::{
     common::commands::{DataBuffer, MmcCommand},
     constants::*,
-    delay_us,
     host::{MmcHostError, MmcHostResult, rockchip::SdhciHost},
+    mci_sleep,
 };
 
 use log::{info, trace, warn};
@@ -53,7 +54,7 @@ impl SdhciHost {
                 }
             }
             time += 1;
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
         }
 
         // Clear all interrupt statuses
@@ -115,7 +116,7 @@ impl SdhciHost {
             }
 
             #[cfg(feature = "pio")]
-            {            
+            {
                 self.write_reg16(
                     EMMC_BLOCK_SIZE,
                     (cmd.block_size & 0xFFF).try_into().unwrap(),
@@ -207,7 +208,7 @@ impl SdhciHost {
             }
 
             timeout_val -= 1;
-            delay_us(100);
+            mci_sleep(Duration::from_micros(100));
         }
 
         // Process command completion
@@ -321,7 +322,7 @@ impl SdhciHost {
         for i in (0..len).step_by(4) {
             // Read 32-bit word from buffer data register
             let val = self.read_reg32(EMMC_BUF_DATA);
-            delay_us(100);
+            mci_sleep(Duration::from_micros(100));
 
             // Unpack the 32-bit word into individual bytes, handling buffer boundary
             buffer[i] = (val & 0xFF) as u8;
@@ -379,7 +380,7 @@ impl SdhciHost {
                 return Err(MmcHostError::DataError);
             }
 
-            delay_us(1000); // Wait for 1 ms before checking again
+            mci_sleep(Duration::from_micros(1000)); // Wait for 1 ms before checking again
         }
 
         // Timeout, return error
@@ -427,10 +428,10 @@ impl SdhciHost {
 
             // Handle timeout to prevent infinite loop
             if timeout > 0 {
-                use crate::delay_us;
+                use crate::mci_sleep;
 
                 timeout -= 1;
-                delay_us(1000); // Wait 1ms before checking again
+                mci_sleep(Duration::from_micros(1000)); // Wait 1ms before checking again
             } else {
                 warn!("Data transfer timeout");
                 return Err(MmcHostError::Timeout);

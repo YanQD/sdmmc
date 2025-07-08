@@ -2,8 +2,6 @@ pub mod block;
 
 mod cmd;
 mod ext;
-mod sd;
-mod mmc;
 
 extern crate alloc;
 use alloc::string::String;
@@ -16,6 +14,7 @@ use log::trace;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::panic;
+use core::time::Duration;
 
 use super::common::commands::MmcCommand;
 use crate::common::HostCapabilities;
@@ -23,8 +22,8 @@ use crate::{
     aux::*,
     card::{CardType, MmcCard},
     constants::*,
-    delay_us,
     host::{MmcHostError, MmcHostOps, MmcHostResult},
+    mci_sleep,
 };
 
 #[derive(Debug)]
@@ -165,7 +164,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             }
 
             timeout -= 1;
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
         }
 
         Ok(())
@@ -295,7 +294,7 @@ impl<T: MmcHostOps> MmcHost<T> {
 
         let dsr_imp = ((csd[1] >> 12) & 0x1) != 0;
         card_mut.base_info_mut().set_dsr_imp(dsr_imp);
-        
+
         // CMD4: Set DSR if required by card
         self.set_dsr_if_required()?;
 
@@ -504,7 +503,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             let dsr_value = (dsr & 0xffff) << 16;
             self.mmc_set_dsr(dsr_value)?;
         }
-        
+
         Ok(())
     }
 
@@ -528,7 +527,7 @@ impl<T: MmcHostOps> MmcHost<T> {
                 _ => card_mut.base_info_mut().set_card_version(MMC_VERSION_1_2),
             }
         }
-        
+
         Ok(())
     }
 
@@ -545,7 +544,7 @@ impl<T: MmcHostOps> MmcHost<T> {
             let capabilities = self.host_ops().get_capabilities();
             capabilities.get_host_caps()
         };
-        
+
         self.mmc_set_capacity(0)?;
         self.mmc_change_freq(host_caps)?;
         self.card_mut().unwrap().set_initialized(true);

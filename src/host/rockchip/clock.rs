@@ -1,10 +1,12 @@
+use core::time::Duration;
+
 use crate::{
     aux::dll_lock_wo_tmout,
     common::clock::emmc_set_clk,
     constants::*,
-    core::MmcHostInfo,
-    delay_us,
     host::{MmcHostError, MmcHostResult, rockchip::SdhciHost},
+    mci_core::MmcHostInfo,
+    mci_sleep,
 };
 use log::{debug, info};
 
@@ -101,7 +103,7 @@ impl SdhciHost {
                 return Err(MmcHostError::Timeout);
             }
             timeout -= 1;
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
         }
 
         // first disable the clock
@@ -177,7 +179,7 @@ impl SdhciHost {
         let mut timeout = 20;
         while (self.read_reg16(EMMC_CLOCK_CONTROL) & EMMC_CLOCK_INT_STABLE) == 0 {
             timeout -= 1;
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
             if timeout == 0 {
                 info!("Internal clock never stabilised.");
                 return Err(MmcHostError::Timeout);
@@ -223,7 +225,7 @@ impl SdhciHost {
         info!("EMMC Power Control: {:#x}", self.read_reg8(EMMC_POWER_CTRL));
 
         // Small delay for power to stabilize
-        delay_us(10000);
+        mci_sleep(Duration::from_micros(10000));
 
         Ok(())
     }
@@ -246,7 +248,7 @@ impl SdhciHost {
         if freq >= 100_000_000 {
             // Enable DLL
             self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, DWCMSHC_EMMC_DLL_CTRL_RESET);
-            delay_us(1000);
+            mci_sleep(Duration::from_micros(1000));
             self.write_reg32(DWCMSHC_EMMC_DLL_CTRL, 0);
             let mut extra = 0x1 << 16 | 0x2 << 17 | 0x3 << 19;
             self.write_reg32(DWCMSHC_EMMC_ATCTRL, extra);
@@ -267,7 +269,7 @@ impl SdhciHost {
                     break;
                 }
 
-                delay_us(1000);
+                mci_sleep(Duration::from_micros(1000));
                 timeout -= 1;
             }
 

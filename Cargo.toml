@@ -6,16 +6,16 @@ edition = "2024"
 [dependencies]
 fdt-parser = "0.4"
 aarch64-cpu = "10.0"
-smccc = "0.2"
 bitflags = "2.9"
 arm_pl011 = "0.1"
 kspin = "0.1"
 log = "0.4"
-# bare-test = "0.4.1"
 spin = "0.10.0"
 dma-api = { version = "0.3", features = ["alloc"] }
 paste = "1.0.15"
-cfg-if = "1.0"
+lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+cfg-if = "1.0.1"
+rlsf = "0.2.1"
 
 [features]
 default = ["dma"]
@@ -31,7 +31,7 @@ byte-unit = { version = "5.1.6", default-features = false, features = ["byte"] }
 rk3568_clk = { git = "https://github.com/arceos-hypervisor/rk3568_clk.git" }
 
 [build-dependencies]
-bare-test-macros = "0.2.0"
+bare-test-macros = "0.2"
 
 [[test]]
 name = "test"

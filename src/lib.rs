@@ -2,53 +2,63 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
-mod aux;
-mod card;
-mod common;
+extern crate alloc;
 
-pub mod constants;
-pub mod core;
-pub mod host;
+#[macro_use]
+pub mod regs;
+pub mod mci;
+pub mod mci_host;
+pub mod osa;
 
-use log::warn;
+mod tools;
 
-pub use crate::common::clock::*;
+use alloc::{format, vec::Vec};
+use log::error;
+pub use mci_host::*;
 
+// mod aux;
+// mod card;
+// mod common;
+
+// pub mod constants;
+// pub mod host;
+// pub mod mci_core;
+
+use core::time::Duration;
+
+// pub use crate::common::clock::*;
 pub const BLOCK_SIZE: usize = 512;
 
 pub unsafe fn dump_memory_region(addr: usize, size: usize) {
-    let start_ptr = addr as *const u32;
-    let word_count = size / 4; // 每个u32是4字节
+    let start_ptr: *const u32 = addr as *const u32;
+    let word_count = size / 4;
 
-    warn!(
-        "Memory dump from 0x{:08x} to 0x{:08x}:",
-        addr,
-        addr + size - 1
-    );
+    error!("Memory dump from 0x{:08x}:", addr);
 
-    for i in 0..word_count {
-        if i % 4 == 0 {
-            warn!("\n0x{:08x}:", addr + i * 4);
+    for chunk_start in (0..word_count).step_by(8) {
+        let mut values = Vec::new();
+        let chunk_end = (chunk_start + 8).min(word_count);
+
+        for i in chunk_start..chunk_end {
+            let value = unsafe { *start_ptr.add(i) };
+            values.push(format!("{:08x}", value));
         }
 
-        let value = unsafe { *start_ptr.add(i) };
-        warn!(" 0x{:08x}", value);
+        error!("  0x{:08x}: [{}]", addr + chunk_start * 4, values.join(" "));
     }
-
-    warn!("");
 }
 
 pub trait Kernel {
-    fn sleep(us: u64);
+    fn sleep(duration: Duration);
 }
 
-pub(crate) fn delay_us(us: u64) {
+pub(crate) fn mci_sleep(duration: Duration) {
     unsafe extern "Rust" {
-        fn delay_us(us: u64);
+        fn _mci_sleep(duration: Duration);
     }
 
     unsafe {
-        delay_us(us);
+        _mci_sleep(duration);
     }
 }
 
@@ -56,8 +66,8 @@ pub(crate) fn delay_us(us: u64) {
 macro_rules! set_impl {
     ($t: ty) => {
         #[unsafe(no_mangle)]
-        unsafe fn delay_us(us: u64) {
-            <$t as $crate::Kernel>::sleep(us)
+        unsafe fn _mci_sleep(duration: Duration) {
+            <$t as $crate::Kernel>::sleep(duration)
         }
     };
 }

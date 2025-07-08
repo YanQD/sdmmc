@@ -43,12 +43,25 @@ test:
 	@echo "Running tests" 
 	@cargo test --test test -- --show-output
 
-uboot: 
-	@echo "Running tests" 
-	@cargo test --release --test test -- --show-output --uboot
+define run_uboot_test
+	@echo "Running $(1) U-Boot tests"
+	@if [ -f 'configs/$(1).bare-test.toml' ] && [ -f 'configs/$(1).test.rs' ]; then \
+		cp configs/$(1).bare-test.toml .bare-test.toml; \
+		cp configs/$(1).test.rs tests/test.rs; \
+		cargo test --release --test test -- --show-output --uboot; \
+	else \
+		echo "Error: $(1) config file not found!"; \
+		exit 1; \
+	fi
+endef
 
+phytium_uboot:
+	$(call run_uboot_test,phytium)
+
+rockchip_uboot:
+	$(call run_uboot_test,rockchip)
 clean:
 	@echo "Cleaning up"
 	@cargo clean
 
-PHONY: build run disk_img clean dtb test
+PHONY: build run disk_img clean dtb test phytium_uboot rockchip_uboot

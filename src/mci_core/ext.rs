@@ -1,8 +1,8 @@
 use crate::{
     common::commands::MmcCommand,
     constants::*,
-    core::MmcHost,
     host::{MmcHostError, MmcHostOps, MmcHostResult},
+    mci_core::MmcHost,
 };
 
 impl<T: MmcHostOps> MmcHost<T> {
